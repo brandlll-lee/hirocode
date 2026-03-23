@@ -1,0 +1,32 @@
+{
+	"extends": "./tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"paths": {
+			"*": ["./*"],
+			"@hirocode/ai": ["./packages/ai/src/index.ts"],
+			"@hirocode/ai/bedrock-provider": ["./packages/ai/bedrock-provider.d.ts"],
+			"@hirocode/ai/oauth": ["./packages/ai/src/oauth.ts"],
+			"@hirocode/ai/*": ["./packages/ai/src/*"],
+			"@hirocode/ai/dist/*": ["./packages/ai/src/*"],
+			"@hirocode/agent-core": ["./packages/agent/src/index.ts"],
+			"@hirocode/agent-core/*": ["./packages/agent/src/*"],
+			"@hirocode/coding-agent": ["./packages/coding-agent/src/index.ts"],
+			"@hirocode/coding-agent/hooks": ["./packages/coding-agent/src/core/hooks/index.ts"],
+			"@hirocode/coding-agent/*": ["./packages/coding-agent/src/*"],
+			"@sinclair/typebox": ["./node_modules/@sinclair/typebox"],
+			"@hirocode/mom": ["./packages/mom/src/index.ts"],
+			"@hirocode/mom/*": ["./packages/mom/src/*"],
+			"@hirocode/pods": ["./packages/pods/src/index.ts"],
+			"@hirocode/pods/*": ["./packages/pods/src/*"],
+			"@hirocode/tui": ["./packages/tui/src/index.ts"],
+			"@hirocode/tui/*": ["./packages/tui/src/*"],
+			"@hirocode/web-ui": ["./packages/web-ui/src/index.ts"],
+			"@hirocode/web-ui/*": ["./packages/web-ui/src/*"],
+			"@hirocode/agent-old": ["./packages/agent-old/src/index.ts"],
+			"@hirocode/agent-old/*": ["./packages/agent-old/src/*"]
+		}
+	},
+	"include": ["packages/*/src/**/*", "packages/*/test/**/*", "packages/coding-agent/examples/**/*"],
+	"exclude": ["packages/web-ui/**/*", "**/dist/**"]
+}

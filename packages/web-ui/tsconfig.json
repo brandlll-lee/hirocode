@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+	"baseUrl": ".",
+	"lib": ["ES2022", "DOM", "DOM.Iterable"],
+	"paths": {
+	  "@hirocode/agent-core": ["../agent/src/index.ts"],
+	  "@hirocode/ai": ["../ai/src/index.ts"],
+	  "@hirocode/tui": ["../tui/src/index.ts"]
+	},
+    "noEmit": true
+  },
+  "include": ["src/**/*"]
+}

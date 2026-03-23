@@ -1,0 +1,16 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"paths": {
+			"@hirocode/coding-agent": ["./src/index.ts"],
+			"@hirocode/coding-agent/hooks": ["./src/core/hooks/index.ts"],
+			"@hirocode/tui": ["../tui/src/index.ts"],
+			"@hirocode/ai": ["../ai/src/index.ts"],
+			"@sinclair/typebox": ["../../node_modules/@sinclair/typebox"]
+		},
+		"skipLibCheck": true
+	},
+	"include": ["examples/**/*.ts"],
+	"exclude": ["node_modules", "dist"]
+}

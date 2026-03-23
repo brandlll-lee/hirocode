@@ -1,0 +1,38 @@
+#!/bin/bash
+set -euo pipefail
+
+if ldd --version 2>&1 | grep -qi musl || [ -f /etc/alpine-release ]; then
+    echo "Detected Alpine/musl - installing Node.js via apk"
+    apk add --no-cache bash curl nodejs npm
+else
+    if command -v apt-get &>/dev/null; then
+        apt-get update
+        apt-get install -y bash ca-certificates curl
+    elif command -v yum &>/dev/null; then
+        yum install -y bash ca-certificates curl
+    elif command -v apk &>/dev/null; then
+        apk add --no-cache bash ca-certificates curl
+    else
+        echo "Warning: no known package manager found, assuming bash/curl are present" >&2
+    fi
+
+    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash
+
+    export NVM_DIR="$HOME/.nvm"
+    . "$NVM_DIR/nvm.sh" || true
+    command -v nvm &>/dev/null || { echo "Error: NVM failed to load" >&2; exit 1; }
+
+    nvm install 22
+    nvm alias default 22
+fi
+
+npm install -g --no-audit --no-fund {% if version %}{{ "@hirocode/coding-agent@" + version }}{% else %}@hirocode/coding-agent@latest{% endif %}
+
+for bin in node npm hirocode; do
+    BIN_PATH="$(command -v "$bin")"
+    if [ "$BIN_PATH" != "/usr/local/bin/$bin" ]; then
+        ln -sf "$BIN_PATH" "/usr/local/bin/$bin"
+    fi
+done
+
+hirocode --version
