@@ -2025,6 +2025,8 @@ In non-interactive modes, check `ctx.hasUI` before using UI methods.
 
 All examples in [examples/extensions/](../examples/extensions/).
 
+The `subagent/` example is the supported pattern for delegated workers today: it keeps subagents out of the core runtime, spawns isolated `hirocode` subprocesses, exposes both `subagent` and Task-style `task` tools, and persists child transcripts under `~/.hirocode/agent/subagents/` for later resume.
+
 | Example | Description | Key APIs |
 |---------|-------------|----------|
 | **Tools** |||
@@ -2079,7 +2081,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `ssh.ts` | SSH remote execution | `registerFlag`, `on("user_bash")`, `on("before_agent_start")`, tool operations |
 | `interactive-shell.ts` | Persistent shell session | `on("user_bash")` |
 | `sandbox/` | Sandboxed tool execution | Tool operations |
-| `subagent/` | Spawn sub-agents | `registerTool`, `exec` |
+| `subagent/` | Supported subprocess-based subagent extension with `task` alias | `registerTool`, `exec` |
 | **Games** |||
 | `snake.ts` | Snake game | `registerCommand`, `ui.custom`, keyboard handling |
 | `space-invaders.ts` | Space Invaders game | `registerCommand`, `ui.custom` |

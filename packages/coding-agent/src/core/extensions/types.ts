@@ -33,7 +33,7 @@ import type {
 	TUI,
 } from "@hirocode/tui";
 import type { Static, TSchema } from "@sinclair/typebox";
-import type { Theme } from "../../modes/interactive/theme/theme.js";
+import type { Theme, ThemeBg } from "../../modes/interactive/theme/theme.js";
 import type { BashResult } from "../bash-executor.js";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index.js";
 import type { EventBus } from "../event-bus.js";
@@ -326,6 +326,8 @@ export interface ToolRenderResultOptions {
 
 /** Context passed to tool renderers. */
 export interface ToolRenderContext<TState = any, TArgs = any> {
+	/** UI instance for animated or interactive renderers. */
+	ui: TUI;
 	/** Current tool call arguments. Shared across call/result renders for the same tool call. */
 	args: TArgs;
 	/** Unique id for this tool execution. Stable across call/result renders for the same tool call. */
@@ -368,6 +370,10 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	promptGuidelines?: string[];
 	/** Parameter schema (TypeBox) */
 	parameters: TParams;
+	/** Visual surface style for interactive tool execution rendering. Defaults to "boxed". */
+	surfaceStyle?: "boxed" | "plain";
+	/** Optional background token override for interactive tool execution rendering. */
+	surfaceBackground?: ThemeBg;
 
 	/** Execute the tool. */
 	execute(

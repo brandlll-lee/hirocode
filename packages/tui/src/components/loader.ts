@@ -9,20 +9,24 @@ export class Loader extends Text {
 	private currentFrame = 0;
 	private intervalId: NodeJS.Timeout | null = null;
 	private ui: TUI | null = null;
+	private leadingBlankLine: boolean;
 
 	constructor(
 		ui: TUI,
 		private spinnerColorFn: (str: string) => string,
 		private messageColorFn: (str: string) => string,
 		private message: string = "Loading...",
+		options?: { leadingBlankLine?: boolean; paddingX?: number },
 	) {
-		super("", 1, 0);
+		super("", options?.paddingX ?? 1, 0);
 		this.ui = ui;
+		this.leadingBlankLine = options?.leadingBlankLine ?? true;
 		this.start();
 	}
 
 	render(width: number): string[] {
-		return ["", ...super.render(width)];
+		const lines = super.render(width);
+		return this.leadingBlankLine ? ["", ...lines] : lines;
 	}
 
 	start() {

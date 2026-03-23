@@ -1,15 +1,19 @@
-# Subagent Example
+# Subagent Extension
 
-Delegate tasks to specialized subagents with isolated context windows.
+Official subprocess-based subagent extension for hirocode. Delegate tasks to specialized subagents with isolated context windows.
 
 ## Features
 
-- **Isolated context**: Each subagent runs in a separate `pi` process
+- **Isolated context**: Each subagent runs in a separate `hirocode` process
 - **Streaming output**: See tool calls and progress as they happen
 - **Parallel streaming**: All parallel tasks stream updates simultaneously
 - **Markdown rendering**: Final output rendered with proper formatting (expanded view)
 - **Usage tracking**: Shows turns, tokens, cost, and context usage per agent
 - **Abort support**: Ctrl+C propagates to kill subagent processes
+- **Task alias**: Registers both `subagent` and `task` for Claude/Task-style delegation prompts
+- **Persistent transcripts**: Each delegated task gets its own child session file under `~/.hirocode/agent/subagents/`
+- **Resume support**: Reuse `task_id` with the `task` alias to continue an existing child session
+- **Session navigation**: Use `/subagents` to jump into delegated child sessions from the current branch
 
 ## Structure
 
@@ -35,32 +39,36 @@ From the repository root, symlink the files:
 
 ```bash
 # Symlink the extension (must be in a subdirectory with index.ts)
-mkdir -p ~/.pi/agent/extensions/subagent
-ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/index.ts" ~/.pi/agent/extensions/subagent/index.ts
-ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/agents.ts" ~/.pi/agent/extensions/subagent/agents.ts
+mkdir -p ~/.hirocode/agent/extensions/subagent
+ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/index.ts" ~/.hirocode/agent/extensions/subagent/index.ts
+ln -sf "$(pwd)/packages/coding-agent/examples/extensions/subagent/agents.ts" ~/.hirocode/agent/extensions/subagent/agents.ts
 
 # Symlink agents
-mkdir -p ~/.pi/agent/agents
+mkdir -p ~/.hirocode/agent/agents
 for f in packages/coding-agent/examples/extensions/subagent/agents/*.md; do
-  ln -sf "$(pwd)/$f" ~/.pi/agent/agents/$(basename "$f")
+  ln -sf "$(pwd)/$f" ~/.hirocode/agent/agents/$(basename "$f")
 done
 
 # Symlink workflow prompts
-mkdir -p ~/.pi/agent/prompts
+mkdir -p ~/.hirocode/agent/prompts
 for f in packages/coding-agent/examples/extensions/subagent/prompts/*.md; do
-  ln -sf "$(pwd)/$f" ~/.pi/agent/prompts/$(basename "$f")
+  ln -sf "$(pwd)/$f" ~/.hirocode/agent/prompts/$(basename "$f")
 done
 ```
 
+Legacy `.pi/...` locations still work for existing setups, but new installs should use `.hirocode/...`.
+
 ## Security Model
 
-This tool executes a separate `pi` subprocess with a delegated system prompt and tool/model configuration.
+This tool executes a separate `hirocode` subprocess with a delegated system prompt and tool/model configuration.
 
-**Project-local agents** (`.pi/agents/*.md`) are repo-controlled prompts that can instruct the model to read files, run bash commands, etc.
+Each delegated task writes to its own child session file instead of using `--no-session`. The parent session stores only a summary plus task linkage metadata.
 
-**Default behavior:** Only loads **user-level agents** from `~/.pi/agent/agents`.
+**Project-local agents** (`.hirocode/agents/*.md`) are repo-controlled prompts that can instruct the model to read files, run bash commands, etc.
 
-To enable project-local agents, pass `agentScope: "both"` (or `"project"`). Only do this for repositories you trust.
+**Default behavior:** Only loads **user-level agents** from `~/.hirocode/agent/agents`.
+
+To enable project-local agents, pass `agentScope: "both"` (or `"project"`). Only do this for repositories you trust. For compatibility, the extension still falls back to legacy `.pi/agents` if `.hirocode/agents` is absent.
 
 When running interactively, the tool prompts for confirmation before running project-local agents. Set `confirmProjectAgents: false` to disable.
 
@@ -69,6 +77,16 @@ When running interactively, the tool prompts for confirmation before running pro
 ### Single agent
 ```
 Use scout to find all authentication code
+```
+
+### Task alias
+```
+Use the task tool with subagent_type "scout" to find all authentication code
+```
+
+### Resume a previous task
+```
+Use the task tool with task_id "<previous-task-id>" and subagent_type "scout" to continue the authentication scan
 ```
 
 ### Parallel execution
@@ -95,6 +113,46 @@ Use a chain: first have scout find the read tool, then have planner suggest impr
 | Single | `{ agent, task }` | One agent, one task |
 | Parallel | `{ tasks: [...] }` | Multiple agents run concurrently (max 8, 4 concurrent) |
 | Chain | `{ chain: [...] }` | Sequential with `{previous}` placeholder |
+
+`task` is a single-task alias with Claude/Task-style parameters:
+
+```json
+{
+  "description": "Auth code discovery",
+  "prompt": "Find all authentication-related code paths",
+  "subagent_type": "scout"
+}
+```
+
+The extension returns `task_id` and `subagent_id` in Task tool results, and includes child task IDs in `subagent` summaries so the parent agent can hand work back to a specific child later. Resume only works for tasks previously created by this extension.
+
+New task runs pre-create the child session with the same id used for `task_id`, so resume tokens now line up with the child session identity. Older runs may still surface a separate `subagent_id`.
+
+## Child session storage
+
+Delegated task transcripts are stored separately from the parent conversation:
+
+```text
+~/.hirocode/agent/subagents/<parent-session-id>/
+  task-<task-id>.json
+  task-<task-id>.jsonl
+```
+
+- `task-<task-id>.json` stores task metadata used for resume
+- `task-<task-id>.jsonl` is the child hirocode session transcript
+- the parent tool result keeps only linkage metadata and the summarized output
+
+## Session switching
+
+`/subagents` switches directly into the selected child session.
+
+If multiple child sessions exist on the current branch, the command first lets you choose which one to open.
+
+If the selected child is still running, you get two options:
+- wait until the current parent turn is idle, then switch safely
+- or switch immediately and interrupt the current work
+
+This keeps navigation simple while still making it explicit when a direct switch would stop the current top-level turn.
 
 ## Output Display
 
@@ -128,7 +186,7 @@ Agents are markdown files with YAML frontmatter:
 ---
 name: my-agent
 description: What this agent does
-tools: read, grep, find, ls
+tools: [read, grep, find, ls]
 model: claude-haiku-4-5
 ---
 
@@ -136,8 +194,15 @@ System prompt for the agent goes here.
 ```
 
 **Locations:**
-- `~/.pi/agent/agents/*.md` - User-level (always loaded)
-- `.pi/agents/*.md` - Project-level (only with `agentScope: "project"` or `"both"`)
+- `~/.hirocode/agent/agents/*.md` - User-level (always loaded)
+- `.hirocode/agents/*.md` - Project-level (only with `agentScope: "project"` or `"both"`)
+
+Optional frontmatter:
+- `allowSubagents: true` - Opt this agent into nested `task`/`subagent` calls. By default, delegated child sessions cannot spawn more subagents.
+
+Legacy fallbacks still recognized:
+- `~/.pi/agent/agents/*.md`
+- `.pi/agents/*.md`
 
 Project agents override user agents with the same name when `agentScope: "both"`.
 

@@ -6,7 +6,7 @@
  */
 
 import type { ImageContent, TextContent } from "@hirocode/ai";
-import type { Component } from "@hirocode/tui";
+import type { Component, TUI } from "@hirocode/tui";
 import type { Theme } from "../../modes/interactive/theme/theme.js";
 import type { ToolDefinition, ToolRenderContext } from "../extensions/types.js";
 import { ansiLinesToHtml } from "./ansi-to-html.js";
@@ -46,6 +46,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 	const renderedResultComponents = new Map<string, Component>();
 	const renderedStates = new Map<string, any>();
 	const renderedArgs = new Map<string, unknown>();
+	const inertUi = { requestRender: () => {} } as unknown as TUI;
 
 	const getState = (toolCallId: string): any => {
 		let state = renderedStates.get(toolCallId);
@@ -64,6 +65,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 		isError: boolean,
 	): ToolRenderContext => {
 		return {
+			ui: inertUi,
 			args: renderedArgs.get(toolCallId),
 			toolCallId,
 			invalidate: () => {},

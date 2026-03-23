@@ -3,16 +3,36 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import { getAgentDir, parseFrontmatter } from "@hirocode/coding-agent";
+import { type Static, Type } from "@sinclair/typebox";
+import { TypeCompiler } from "@sinclair/typebox/compiler";
+import { getAgentDir } from "../../../src/config.js";
+import { parseFrontmatter } from "../../../src/utils/frontmatter.js";
 
 export type AgentScope = "user" | "project" | "both";
+
+const agentFrontmatterSchema = Type.Object(
+	{
+		name: Type.String({ minLength: 1, pattern: "^[a-z0-9][a-z0-9_-]*$" }),
+		description: Type.String({ minLength: 1 }),
+		tools: Type.Optional(Type.Union([Type.String(), Type.Array(Type.String())])),
+		model: Type.Optional(Type.String({ minLength: 1 })),
+		allowSubagents: Type.Optional(Type.Boolean()),
+	},
+	{ additionalProperties: true },
+);
+
+const validateAgentFrontmatter = TypeCompiler.Compile(agentFrontmatterSchema);
+
+type AgentFrontmatter = Static<typeof agentFrontmatterSchema>;
 
 export interface AgentConfig {
 	name: string;
 	description: string;
 	tools?: string[];
 	model?: string;
+	allowSubagents?: boolean;
 	systemPrompt: string;
 	source: "user" | "project";
 	filePath: string;
@@ -21,6 +41,51 @@ export interface AgentConfig {
 export interface AgentDiscoveryResult {
 	agents: AgentConfig[];
 	projectAgentsDir: string | null;
+}
+
+function normalizeTools(value: AgentFrontmatter["tools"]): string[] | undefined {
+	const tools = Array.isArray(value)
+		? value.map((item) => item.trim()).filter(Boolean)
+		: value
+			? value
+					.split(",")
+					.map((item) => item.trim())
+					.filter(Boolean)
+			: [];
+
+	if (tools.length === 0) {
+		return undefined;
+	}
+
+	return [...new Set(tools)];
+}
+
+export function parseAgentMarkdown(
+	content: string,
+	source: "user" | "project",
+	filePath: string,
+): AgentConfig | undefined {
+	const { frontmatter, body } = parseFrontmatter<Record<string, unknown>>(content);
+	if (!validateAgentFrontmatter.Check(frontmatter)) {
+		return undefined;
+	}
+
+	const prompt = body.trim();
+	if (!prompt) {
+		return undefined;
+	}
+
+	const parsed = frontmatter as AgentFrontmatter;
+	return {
+		name: parsed.name,
+		description: parsed.description,
+		tools: normalizeTools(parsed.tools),
+		model: parsed.model,
+		allowSubagents: parsed.allowSubagents,
+		systemPrompt: prompt,
+		source,
+		filePath,
+	};
 }
 
 function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig[] {
@@ -49,26 +114,10 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 			continue;
 		}
 
-		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);
-
-		if (!frontmatter.name || !frontmatter.description) {
-			continue;
+		const agent = parseAgentMarkdown(content, source, filePath);
+		if (agent) {
+			agents.push(agent);
 		}
-
-		const tools = frontmatter.tools
-			?.split(",")
-			.map((t: string) => t.trim())
-			.filter(Boolean);
-
-		agents.push({
-			name: frontmatter.name,
-			description: frontmatter.description,
-			tools: tools && tools.length > 0 ? tools : undefined,
-			model: frontmatter.model,
-			systemPrompt: body,
-			source,
-			filePath,
-		});
 	}
 
 	return agents;
@@ -82,11 +131,23 @@ function isDirectory(p: string): boolean {
 	}
 }
 
+function getUserAgentDirs(): string[] {
+	const primaryDir = path.join(getAgentDir(), "agents");
+	const legacyDir = path.join(os.homedir(), ".pi", "agent", "agents");
+	if (primaryDir === legacyDir) {
+		return [primaryDir];
+	}
+	return [legacyDir, primaryDir];
+}
+
 function findNearestProjectAgentsDir(cwd: string): string | null {
 	let currentDir = cwd;
 	while (true) {
-		const candidate = path.join(currentDir, ".pi", "agents");
-		if (isDirectory(candidate)) return candidate;
+		const primary = path.join(currentDir, ".hirocode", "agents");
+		if (isDirectory(primary)) return primary;
+
+		const legacy = path.join(currentDir, ".pi", "agents");
+		if (isDirectory(legacy)) return legacy;
 
 		const parentDir = path.dirname(currentDir);
 		if (parentDir === currentDir) return null;
@@ -95,10 +156,9 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 }
 
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
-	const userDir = path.join(getAgentDir(), "agents");
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 
-	const userAgents = scope === "project" ? [] : loadAgentsFromDir(userDir, "user");
+	const userAgents = scope === "project" ? [] : getUserAgentDirs().flatMap((dir) => loadAgentsFromDir(dir, "user"));
 	const projectAgents = scope === "user" || !projectAgentsDir ? [] : loadAgentsFromDir(projectAgentsDir, "project");
 
 	const agentMap = new Map<string, AgentConfig>();

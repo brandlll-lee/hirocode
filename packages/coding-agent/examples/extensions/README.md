@@ -1,15 +1,15 @@
 # Extension Examples
 
-Example extensions for pi-coding-agent.
+Example extensions for hirocode.
 
 ## Usage
 
 ```bash
 # Load an extension with --extension flag
-pi --extension examples/extensions/permission-gate.ts
+hirocode --extension examples/extensions/permission-gate.ts
 
 # Or copy to extensions directory for auto-discovery
-cp permission-gate.ts ~/.pi/agent/extensions/
+cp permission-gate.ts ~/.hirocode/agent/extensions/
 ```
 
 ## Examples
@@ -39,7 +39,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 | `truncated-tool.ts` | Wraps ripgrep with proper output truncation (50KB/2000 lines) |
 | `antigravity-image-gen.ts` | Generate images via Google Antigravity with optional save-to-disk modes |
 | `ssh.ts` | Delegate all tools to a remote machine via SSH using pluggable operations |
-| `subagent/` | Delegate tasks to specialized subagents with isolated context windows |
+| `subagent/` | Official subprocess-based subagent extension with `task` compatibility alias, isolated worker contexts, and resumable child transcripts |
 
 ### Commands & UI
 

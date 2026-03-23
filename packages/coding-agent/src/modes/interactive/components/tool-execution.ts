@@ -106,6 +106,7 @@ export class ToolExecutionComponent extends Container {
 
 	private getRenderContext(lastComponent: Component | undefined): ToolRenderContext {
 		return {
+			ui: this.ui,
 			args: this.args,
 			toolCallId: this.toolCallId,
 			invalidate: () => {
@@ -213,16 +214,18 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private updateDisplay(): void {
-		const bgFn = this.isPartial
-			? (text: string) => theme.bg("toolPendingBg", text)
-			: this.result?.isError
-				? (text: string) => theme.bg("toolErrorBg", text)
-				: (text: string) => theme.bg("toolSuccessBg", text);
+		const surfaceStyle = this.getSurfaceStyle();
+		const surfaceBackground = this.getSurfaceBackground();
+		const backgroundKey =
+			surfaceBackground ??
+			(this.isPartial ? "toolPendingBg" : this.result?.isError ? "toolErrorBg" : "toolSuccessBg");
+		const bgFn = (text: string) => theme.bg(backgroundKey, text);
+		const effectiveBgFn = surfaceStyle === "plain" ? undefined : bgFn;
 
 		let hasContent = false;
 		this.hideComponent = false;
 		if (this.hasRendererDefinition()) {
-			this.contentBox.setBgFn(bgFn);
+			this.contentBox.setBgFn(effectiveBgFn);
 			this.contentBox.clear();
 
 			const callRenderer = this.getCallRenderer();
@@ -272,7 +275,7 @@ export class ToolExecutionComponent extends Container {
 				}
 			}
 		} else {
-			this.contentText.setCustomBgFn(bgFn);
+			this.contentText.setCustomBgFn(effectiveBgFn);
 			this.contentText.setText(this.formatToolExecution());
 			hasContent = true;
 		}
@@ -332,5 +335,13 @@ export class ToolExecutionComponent extends Container {
 			text += `\n${output}`;
 		}
 		return text;
+	}
+
+	private getSurfaceStyle(): "boxed" | "plain" {
+		return this.toolDefinition?.surfaceStyle ?? this.builtInToolDefinition?.surfaceStyle ?? "boxed";
+	}
+
+	private getSurfaceBackground() {
+		return this.toolDefinition?.surfaceBackground ?? this.builtInToolDefinition?.surfaceBackground;
 	}
 }

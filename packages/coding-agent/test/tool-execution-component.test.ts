@@ -226,6 +226,57 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("done");
 	});
 
+	test("supports plain surface style without tool background colors", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			surfaceStyle: "plain",
+			renderCall: () => new Text("plain call", 0, 0),
+			renderResult: () => new Text("plain result", 0, 0),
+		};
+
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-plain",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
+
+		const rawRendered = component.render(120).join("\n");
+		const plainRendered = stripAnsi(rawRendered);
+		expect(plainRendered).toContain("plain call");
+		expect(plainRendered).toContain("plain result");
+		expect(rawRendered).not.toContain("\u001b[49m");
+		expect(rawRendered).not.toContain("\u001b[48;");
+	});
+
+	test("supports overriding boxed surface background", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			surfaceBackground: "toolPendingBg",
+			renderCall: () => new Text("boxed call", 0, 0),
+			renderResult: () => new Text("boxed result", 0, 0),
+		};
+
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-boxed",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "done" }], details: {}, isError: false }, false);
+
+		const rawRendered = component.render(120).join("\n");
+		const rendered = stripAnsi(rawRendered);
+		expect(rendered).toContain("boxed call");
+		expect(rendered).toContain("boxed result");
+		expect(rawRendered).toContain("\u001b[48;");
+	});
+
 	test("trims trailing blank display lines from write previews", () => {
 		const component = new ToolExecutionComponent(
 			"write",
