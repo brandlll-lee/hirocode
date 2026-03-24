@@ -39,6 +39,7 @@ import { createToolHtmlRenderer } from "./export-html/tool-renderer.js";
 import {
 	type ContextUsage,
 	type ExtensionCommandContextActions,
+	type ExtensionContext,
 	type ExtensionErrorListener,
 	ExtensionRunner,
 	type ExtensionUIContext,
@@ -273,6 +274,75 @@ export class AgentSession {
 
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
+
+	private _createBaseToolContext(): ExtensionContext {
+		if (this._extensionRunner) {
+			return this._extensionRunner.createContext();
+		}
+
+		const session = this;
+		const ui =
+			this._extensionUIContext ??
+			({
+				select: async () => undefined,
+				confirm: async () => false,
+				input: async () => undefined,
+				notify: () => {},
+				onTerminalInput: () => () => {},
+				setStatus: () => {},
+				setWorkingMessage: () => {},
+				setWidget: () => {},
+				setFooter: () => {},
+				setHeader: () => {},
+				setTitle: () => {},
+				custom: async () => undefined as never,
+				pasteToEditor: () => {},
+				setEditorText: () => {},
+				getEditorText: () => "",
+				editor: async () => undefined,
+				setEditorComponent: () => {},
+				get theme() {
+					return theme;
+				},
+				getAllThemes: () => [],
+				getTheme: () => undefined,
+				setTheme: () => ({ success: false, error: "UI not available" }),
+				getToolsExpanded: () => false,
+				setToolsExpanded: () => {},
+			} satisfies ExtensionUIContext);
+
+		return {
+			ui,
+			hasUI: this._extensionUIContext !== undefined,
+			cwd: this._cwd,
+			sessionManager: this.sessionManager,
+			modelRegistry: this._modelRegistry,
+			get model() {
+				return session.agent.state.model;
+			},
+			isIdle: () => !session.isStreaming,
+			abort: () => {
+				void session.abort();
+			},
+			hasPendingMessages: () => session.pendingMessageCount > 0,
+			shutdown: () => {
+				session._extensionShutdownHandler?.();
+			},
+			getContextUsage: () => session.getContextUsage(),
+			compact: (options) => {
+				void (async () => {
+					try {
+						const result = await session.compact(options?.customInstructions);
+						options?.onComplete?.(result);
+					} catch (error) {
+						const err = error instanceof Error ? error : new Error(String(error));
+						options?.onError?.(err);
+					}
+				})();
+			},
+			getSystemPrompt: () => session.systemPrompt,
+		};
+	}
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -2234,7 +2304,7 @@ export class AgentSession {
 		const toolRegistry = new Map(
 			Array.from(this._baseToolDefinitions.values()).map((definition) => [
 				definition.name,
-				wrapToolDefinition(definition),
+				wrapToolDefinition(definition, () => this._createBaseToolContext()),
 			]),
 		);
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
@@ -2278,6 +2348,7 @@ export class AgentSession {
 			: createAllToolDefinitions(this._cwd, {
 					read: { autoResizeImages },
 					bash: { commandPrefix: shellCommandPrefix },
+					task: { getParentActiveToolNames: () => this.getActiveToolNames() },
 				});
 
 		this._baseToolDefinitions = new Map(
@@ -2313,7 +2384,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write", "webfetch", "websearch"];
+			: ["read", "bash", "edit", "write", "webfetch", "websearch", "task"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

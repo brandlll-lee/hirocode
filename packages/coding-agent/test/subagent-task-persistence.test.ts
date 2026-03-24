@@ -3,13 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-	createTaskReference,
-	extractStoredTaskReferences,
-	findStoredTaskReferenceInBranch,
 	findStoredTaskReferenceOnDisk,
-	formatTaskToolOutput,
-	initializeTaskSession,
-	persistTaskReference,
+	formatTaskReferenceLines,
+	isSubagentSessionFile,
 } from "../examples/extensions/subagent/task-persistence.js";
 
 const AGENT_DIR_ENV = "HIROCODE_CODING_AGENT_DIR";
@@ -21,11 +17,41 @@ afterEach(() => {
 });
 
 describe("subagent task persistence", () => {
-	it("creates and reloads task references from disk metadata", () => {
+	it("reloads legacy task references from disk metadata", () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "hirocode-subagent-persist-"));
 		process.env[AGENT_DIR_ENV] = cwd;
+		const taskDir = path.join(cwd, "subagents", "parent-session");
+		const sessionFile = path.join(taskDir, "task-task-a.jsonl");
+		const metadataFile = path.join(taskDir, "task-task-a.json");
+		fs.mkdirSync(taskDir, { recursive: true });
+		fs.writeFileSync(sessionFile, '{"type":"session","id":"task-a"}\n', "utf-8");
+		fs.writeFileSync(
+			metadataFile,
+			`${JSON.stringify(
+				{
+					taskId: "task-a",
+					parentSessionId: "parent-session",
+					agent: "scout",
+					agentSource: "user",
+					allowSubagents: false,
+					provider: "openai",
+					model: "gpt-5.4",
+					tools: ["read", "grep"],
+					systemPrompt: "Scout the codebase.",
+					sessionFile,
+					metadataFile,
+					sessionId: "child-session",
+				},
+				null,
+				2,
+			)}\n`,
+			"utf-8",
+		);
 
-		const reference = createTaskReference("parent-session", {
+		const loaded = findStoredTaskReferenceOnDisk("task-a", "parent-session");
+		expect(loaded).toEqual({
+			taskId: "task-a",
+			parentSessionId: "parent-session",
 			agent: "scout",
 			agentSource: "user",
 			allowSubagents: false,
@@ -33,81 +59,38 @@ describe("subagent task persistence", () => {
 			model: "gpt-5.4",
 			tools: ["read", "grep"],
 			systemPrompt: "Scout the codebase.",
-		});
-
-		expect(reference.sessionId).toBe(reference.taskId);
-		initializeTaskSession(reference, cwd, "/tmp/parent.jsonl");
-		const header = JSON.parse(fs.readFileSync(reference.sessionFile, "utf-8").trim()) as {
-			id: string;
-			cwd: string;
-			parentSession?: string;
-		};
-		expect(header).toMatchObject({
-			id: reference.taskId,
-			cwd,
-			parentSession: "/tmp/parent.jsonl",
-		});
-
-		persistTaskReference({ ...reference, sessionId: "child-session" });
-
-		const loaded = findStoredTaskReferenceOnDisk(reference.taskId, "parent-session");
-		expect(loaded).toEqual({ ...reference, sessionId: "child-session" });
-		expect(findStoredTaskReferenceOnDisk("child-session", "parent-session")).toEqual({
-			...reference,
+			sessionFile,
+			metadataFile,
 			sessionId: "child-session",
 		});
+		expect(findStoredTaskReferenceOnDisk("child-session", "parent-session")).toEqual({
+			sessionId: "child-session",
+			taskId: "task-a",
+			parentSessionId: "parent-session",
+			agent: "scout",
+			agentSource: "user",
+			allowSubagents: false,
+			provider: "openai",
+			model: "gpt-5.4",
+			tools: ["read", "grep"],
+			systemPrompt: "Scout the codebase.",
+			sessionFile,
+			metadataFile,
+		});
 	});
 
-	it("extracts task references from stored tool result details and branch history", () => {
-		const details = {
-			mode: "parallel",
-			results: [
-				{
-					taskId: "task-a",
-					parentSessionId: "parent-1",
-					agent: "planner",
-					agentSource: "project",
-					sessionFile: "/tmp/task-a.jsonl",
-					metadataFile: "/tmp/task-a.json",
-					sessionId: "child-a",
-					provider: "openai",
-					model: "gpt-5.4",
-				},
-			],
-		};
+	it("detects legacy subagent session files", () => {
+		const root = path.join(os.tmpdir(), "hirocode-subagent-legacy-root");
+		process.env[AGENT_DIR_ENV] = root;
+		const legacyFile = path.join(root, "subagents", "parent-session", "task-1.jsonl");
+		expect(isSubagentSessionFile(legacyFile)).toBe(true);
+		expect(isSubagentSessionFile(path.join(root, "sessions", "session.jsonl"))).toBe(false);
+	});
 
-		expect(extractStoredTaskReferences(details)).toEqual([
-			{
-				taskId: "task-a",
-				parentSessionId: "parent-1",
-				agent: "planner",
-				agentSource: "project",
-				sessionFile: "/tmp/task-a.jsonl",
-				metadataFile: "/tmp/task-a.json",
-				sessionId: "child-a",
-				provider: "openai",
-				model: "gpt-5.4",
-			},
+	it("formats task references with task and subagent ids", () => {
+		expect(formatTaskReferenceLines({ taskId: "task-1", sessionId: "subagent-1" })).toEqual([
+			"task_id: task-1",
+			"subagent_id: subagent-1",
 		]);
-
-		const branch = [
-			{ type: "custom" },
-			{
-				type: "message",
-				message: {
-					role: "toolResult",
-					toolName: "task",
-					details,
-				},
-			},
-		];
-
-		expect(findStoredTaskReferenceInBranch(branch, "task-a")?.sessionId).toBe("child-a");
-	});
-
-	it("formats Task tool output with task and subagent ids", () => {
-		expect(formatTaskToolOutput({ taskId: "task-1", sessionId: "subagent-1" }, "done")).toBe(
-			"task_id: task-1\nsubagent_id: subagent-1\n\n<task_result>\ndone\n</task_result>",
-		);
 	});
 });

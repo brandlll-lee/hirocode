@@ -142,6 +142,10 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
+	getToolCallId(): string {
+		return this.toolCallId;
+	}
+
 	markExecutionStarted(): void {
 		this.executionStarted = true;
 		this.updateDisplay();

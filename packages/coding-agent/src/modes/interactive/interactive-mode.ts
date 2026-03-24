@@ -68,6 +68,8 @@ import { DefaultPackageManager } from "../../core/package-manager.js";
 import type { ResourceDiagnostic } from "../../core/resource-loader.js";
 import { type SessionContext, SessionManager } from "../../core/session-manager.js";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.js";
+import { buildTaskNavigationContext } from "../../core/subagents/task-sessions.js";
+import type { LocatedTaskSession } from "../../core/subagents/types.js";
 import type { TruncationResult } from "../../core/tools/truncate.js";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
@@ -243,6 +245,15 @@ export class InteractiveMode {
 	// Custom header from extension (undefined = use built-in header)
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
 
+	// Detached session view state (viewing a child session while the active session keeps running)
+	private detachedSessionManager: SessionManager | undefined = undefined;
+	private detachedSessionRefreshTimer: ReturnType<typeof setInterval> | undefined = undefined;
+	private detachedSessionLastMtime = 0;
+	private detachedActiveStreamingComponent: AssistantMessageComponent | undefined = undefined;
+	private detachedActiveStreamingMessage: AssistantMessage | undefined = undefined;
+	private detachedActiveToolComponents = new Map<string, ToolExecutionComponent>();
+	private detachedActivePendingToolIds = new Set<string>();
+
 	// Convenience accessors
 	private get agent() {
 		return this.session.agent;
@@ -252,6 +263,259 @@ export class InteractiveMode {
 	}
 	private get settingsManager() {
 		return this.session.settingsManager;
+	}
+	private get activeSessionManager() {
+		return this.session.sessionManager;
+	}
+
+	private isViewingDetachedSession(): boolean {
+		return this.detachedSessionManager !== undefined;
+	}
+
+	private getDisplaySessionManager(): SessionManager {
+		return this.detachedSessionManager ?? this.sessionManager;
+	}
+
+	private stopDetachedSessionView(): void {
+		if (this.detachedSessionRefreshTimer) {
+			clearInterval(this.detachedSessionRefreshTimer);
+			this.detachedSessionRefreshTimer = undefined;
+		}
+		this.detachedSessionManager = undefined;
+		this.detachedSessionLastMtime = 0;
+	}
+
+	private clearDetachedActiveSessionState(): void {
+		this.detachedActiveStreamingComponent = undefined;
+		this.detachedActiveStreamingMessage = undefined;
+		this.detachedActiveToolComponents.clear();
+		this.detachedActivePendingToolIds.clear();
+	}
+
+	private captureDetachedActiveSessionState(): void {
+		if (this.detachedActiveStreamingComponent || this.detachedActiveToolComponents.size > 0) {
+			return;
+		}
+
+		this.detachedActiveStreamingComponent = this.streamingComponent;
+		this.detachedActiveStreamingMessage = this.streamingMessage;
+
+		for (const [toolCallId, component] of this.pendingTools) {
+			this.detachedActiveToolComponents.set(toolCallId, component);
+			this.detachedActivePendingToolIds.add(toolCallId);
+		}
+
+		this.streamingComponent = undefined;
+		this.streamingMessage = undefined;
+		this.pendingTools.clear();
+	}
+
+	private ensureDetachedStreamingComponent(message: AssistantMessage): AssistantMessageComponent {
+		if (!this.detachedActiveStreamingComponent) {
+			this.detachedActiveStreamingComponent = new AssistantMessageComponent(
+				undefined,
+				this.hideThinkingBlock,
+				this.getMarkdownThemeWithSettings(),
+			);
+		}
+		this.detachedActiveStreamingMessage = message;
+		this.detachedActiveStreamingComponent.updateContent(message);
+		return this.detachedActiveStreamingComponent;
+	}
+
+	private ensureDetachedToolComponent(
+		toolCallId: string,
+		toolName: string,
+		args: Record<string, unknown>,
+	): ToolExecutionComponent {
+		let component = this.detachedActiveToolComponents.get(toolCallId);
+		if (!component) {
+			component = new ToolExecutionComponent(
+				toolName,
+				toolCallId,
+				args,
+				{ showImages: this.settingsManager.getShowImages() },
+				this.getRegisteredToolDefinition(toolName),
+				this.ui,
+			);
+			component.setExpanded(this.toolOutputExpanded);
+			this.detachedActiveToolComponents.set(toolCallId, component);
+		} else {
+			component.updateArgs(args);
+		}
+		return component;
+	}
+
+	private captureDetachedActiveSessionEvent(event: AgentSessionEvent): void {
+		if (event.type === "message_start" && event.message.role === "assistant") {
+			this.clearDetachedActiveSessionState();
+			this.ensureDetachedStreamingComponent(event.message);
+			return;
+		}
+
+		if (event.type === "message_update" && event.message.role === "assistant") {
+			this.ensureDetachedStreamingComponent(event.message);
+			for (const content of event.message.content) {
+				if (content.type === "toolCall") {
+					this.ensureDetachedToolComponent(content.id, content.name, content.arguments);
+				}
+			}
+			return;
+		}
+
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			if (this.detachedActiveStreamingComponent) {
+				let errorMessage: string | undefined;
+				if (event.message.stopReason === "aborted") {
+					const retryAttempt = this.session.retryAttempt;
+					errorMessage =
+						retryAttempt > 0
+							? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
+							: "Operation aborted";
+					event.message.errorMessage = errorMessage;
+				}
+				this.detachedActiveStreamingMessage = event.message;
+				this.detachedActiveStreamingComponent.updateContent(event.message);
+
+				if (event.message.stopReason === "aborted" || event.message.stopReason === "error") {
+					if (!errorMessage) {
+						errorMessage = event.message.errorMessage || "Error";
+					}
+					for (const toolCallId of this.detachedActivePendingToolIds) {
+						this.detachedActiveToolComponents.get(toolCallId)?.updateResult({
+							content: [{ type: "text", text: errorMessage }],
+							isError: true,
+						});
+					}
+					this.detachedActivePendingToolIds.clear();
+				} else {
+					for (const toolCallId of this.detachedActivePendingToolIds) {
+						this.detachedActiveToolComponents.get(toolCallId)?.setArgsComplete();
+					}
+				}
+			}
+
+			this.detachedActiveStreamingComponent = undefined;
+			this.detachedActiveStreamingMessage = undefined;
+			return;
+		}
+
+		if (event.type === "tool_execution_start") {
+			const component = this.ensureDetachedToolComponent(event.toolCallId, event.toolName, event.args);
+			component.markExecutionStarted();
+			this.detachedActivePendingToolIds.add(event.toolCallId);
+			return;
+		}
+
+		if (event.type === "tool_execution_update") {
+			const component = this.detachedActiveToolComponents.get(event.toolCallId);
+			if (component) {
+				component.updateResult({ ...event.partialResult, isError: false }, true);
+			}
+			return;
+		}
+
+		if (event.type === "tool_execution_end") {
+			const component = this.detachedActiveToolComponents.get(event.toolCallId);
+			if (component) {
+				component.updateResult({ ...event.result, isError: event.isError });
+				this.detachedActivePendingToolIds.delete(event.toolCallId);
+			}
+		}
+	}
+
+	private restoreDetachedActiveSessionState(): void {
+		if (!this.detachedActiveStreamingComponent && this.detachedActiveToolComponents.size === 0) {
+			this.clearDetachedActiveSessionState();
+			return;
+		}
+
+		for (const child of [...this.chatContainer.children]) {
+			if (!(child instanceof ToolExecutionComponent)) {
+				continue;
+			}
+			if (this.detachedActiveToolComponents.has(child.getToolCallId())) {
+				this.chatContainer.removeChild(child);
+			}
+		}
+
+		if (this.detachedActiveStreamingComponent && this.detachedActiveStreamingMessage) {
+			this.streamingComponent = this.detachedActiveStreamingComponent;
+			this.streamingMessage = this.detachedActiveStreamingMessage;
+			this.chatContainer.addChild(this.streamingComponent);
+		}
+
+		for (const [toolCallId, component] of this.detachedActiveToolComponents) {
+			component.setExpanded(this.toolOutputExpanded);
+			this.chatContainer.addChild(component);
+			if (this.detachedActivePendingToolIds.has(toolCallId)) {
+				this.pendingTools.set(toolCallId, component);
+			}
+		}
+
+		this.clearDetachedActiveSessionState();
+		this.ui.requestRender();
+	}
+
+	private openDetachedSessionView(sessionPath: string): void {
+		if (!this.isViewingDetachedSession()) {
+			this.captureDetachedActiveSessionState();
+		}
+		this.stopDetachedSessionView();
+		this.detachedSessionManager = SessionManager.open(sessionPath, this.activeSessionManager.getSessionDir());
+		try {
+			this.detachedSessionLastMtime = fs.statSync(sessionPath).mtimeMs;
+		} catch {
+			this.detachedSessionLastMtime = 0;
+		}
+		this.detachedSessionRefreshTimer = setInterval(() => {
+			if (!this.detachedSessionManager) {
+				return;
+			}
+			try {
+				const nextMtime = fs.statSync(sessionPath).mtimeMs;
+				if (nextMtime !== this.detachedSessionLastMtime) {
+					this.detachedSessionLastMtime = nextMtime;
+					this.detachedSessionManager = SessionManager.open(
+						sessionPath,
+						this.activeSessionManager.getSessionDir(),
+					);
+					this.rebuildChatFromMessages();
+				}
+			} catch {
+				// Ignore transient read failures while the child session is being written.
+			}
+		}, 400);
+		this.chatContainer.clear();
+		this.renderInitialMessages();
+	}
+
+	private renderDetachedSessionBanner(): void {
+		if (!this.detachedSessionManager) {
+			return;
+		}
+
+		const detachedFile = this.detachedSessionManager.getSessionFile();
+		const activeFile = this.activeSessionManager.getSessionFile();
+		const header = this.detachedSessionManager.getHeader();
+		const title =
+			this.detachedSessionManager.getSessionName() ?? detachedFile ?? this.detachedSessionManager.getSessionId();
+		const stateText =
+			activeFile && this.session.isStreaming
+				? "Viewing detached child session while the active session keeps running."
+				: "Viewing a detached session snapshot.";
+		const lines = [
+			theme.fg("warning", "[Detached session view]"),
+			theme.fg("dim", title),
+			theme.fg("muted", stateText),
+			theme.fg("muted", `Parent: ${header?.parentSession ?? "(none)"}`),
+			theme.fg("muted", `Use /subagents to return or switch, /resume to attach permanently.`),
+		].join("\n");
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		this.chatContainer.addChild(new Text(lines, 1, 0));
+		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+		this.chatContainer.addChild(new Spacer(1));
 	}
 
 	constructor(
@@ -2074,9 +2338,21 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/subagents" || text.startsWith("/subagents ")) {
+				this.editor.setText("");
+				await this.handleSubagentsCommand(text);
+				return;
+			}
 			if (text === "/quit") {
 				this.editor.setText("");
 				await this.shutdown();
+				return;
+			}
+
+			if (this.isViewingDetachedSession()) {
+				this.showWarning(
+					"Viewing a detached child session. Use /subagents to switch views or /resume to attach before sending new input.",
+				);
 				return;
 			}
 
@@ -2141,6 +2417,19 @@ export class InteractiveMode {
 	private async handleEvent(event: AgentSessionEvent): Promise<void> {
 		if (!this.isInitialized) {
 			await this.init();
+		}
+
+		if (
+			this.isViewingDetachedSession() &&
+			(event.type === "message_start" ||
+				event.type === "message_update" ||
+				event.type === "message_end" ||
+				event.type === "tool_execution_start" ||
+				event.type === "tool_execution_update" ||
+				event.type === "tool_execution_end")
+		) {
+			this.captureDetachedActiveSessionEvent(event);
+			return;
 		}
 
 		this.footer.invalidate();
@@ -2324,6 +2613,7 @@ export class InteractiveMode {
 					this.streamingMessage = undefined;
 				}
 				this.pendingTools.clear();
+				this.clearDetachedActiveSessionState();
 
 				await this.checkShutdownRequested();
 
@@ -2362,6 +2652,11 @@ export class InteractiveMode {
 					this.autoCompactionLoader.stop();
 					this.autoCompactionLoader = undefined;
 					this.statusContainer.clear();
+				}
+				if (this.isViewingDetachedSession()) {
+					void this.flushCompactionQueue({ willRetry: event.willRetry });
+					this.ui.requestRender();
+					break;
 				}
 				// Handle result
 				if (event.aborted) {
@@ -2625,15 +2920,20 @@ export class InteractiveMode {
 	}
 
 	renderInitialMessages(): void {
-		// Get aligned messages and entries from session context
-		const context = this.sessionManager.buildSessionContext();
+		const renderSessionManager = this.getDisplaySessionManager();
+		this.chatContainer.clear();
+		if (this.isViewingDetachedSession()) {
+			this.renderDetachedSessionBanner();
+		}
+
+		const context = renderSessionManager.buildSessionContext();
 		this.renderSessionContext(context, {
-			updateFooter: true,
-			populateHistory: true,
+			updateFooter: !this.isViewingDetachedSession(),
+			populateHistory: !this.isViewingDetachedSession(),
 		});
 
 		// Show compaction info if session was compacted
-		const allEntries = this.sessionManager.getEntries();
+		const allEntries = renderSessionManager.getEntries();
 		const compactionCount = allEntries.filter((e) => e.type === "compaction").length;
 		if (compactionCount > 0) {
 			const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
@@ -2652,7 +2952,10 @@ export class InteractiveMode {
 
 	private rebuildChatFromMessages(): void {
 		this.chatContainer.clear();
-		const context = this.sessionManager.buildSessionContext();
+		if (this.isViewingDetachedSession()) {
+			this.renderDetachedSessionBanner();
+		}
+		const context = this.getDisplaySessionManager().buildSessionContext();
 		this.renderSessionContext(context);
 	}
 
@@ -3657,6 +3960,98 @@ export class InteractiveMode {
 		});
 	}
 
+	private formatSubagentSessionOption(session: LocatedTaskSession): string {
+		const status = session.state?.status ?? "completed";
+		const icon = status === "running" ? "⏳" : status === "completed" ? "✓" : status === "aborted" ? "⏹" : "✗";
+		const label = session.metadata?.title ?? `${session.metadata?.agent ?? session.reference.taskId} subagent`;
+		const preview = session.state?.task ?? label;
+		const trimmed = preview.length > 70 ? `${preview.slice(0, 70)}...` : preview;
+		const depth = "depth" in session && typeof session.depth === "number" ? session.depth : 1;
+		const prefix = depth > 1 ? `${"  ".repeat(depth - 1)}↳ ` : "";
+		return `${prefix}${icon} ${session.metadata?.agent ?? session.reference.taskId} - ${trimmed}`;
+	}
+
+	private matchesSubagentQuery(session: LocatedTaskSession, query: string): boolean {
+		const normalized = query.trim().toLowerCase();
+		if (!normalized) {
+			return true;
+		}
+		return [
+			session.metadata?.agent,
+			session.metadata?.title,
+			session.state?.task,
+			session.reference.taskId,
+			session.state?.status,
+		]
+			.filter((value): value is string => Boolean(value))
+			.some((value) => value.toLowerCase().includes(normalized));
+	}
+
+	private async handleSubagentsCommand(text: string): Promise<void> {
+		const query = text.startsWith("/subagents ") ? text.slice(11).trim() : "";
+		const navigation = buildTaskNavigationContext(this.activeSessionManager);
+		const sessions = navigation.sessions.filter((session) => this.matchesSubagentQuery(session, query));
+
+		const options: string[] = [];
+		const returnToActive = this.isViewingDetachedSession();
+		if (returnToActive) {
+			options.push("← Return to active session");
+		}
+		const returnToRoot =
+			!returnToActive &&
+			navigation.currentIsTaskSession &&
+			navigation.rootSessionFile &&
+			navigation.rootSessionFile !== navigation.currentSessionFile;
+		if (returnToRoot) {
+			options.push("← Return to root session");
+		}
+		options.push(...sessions.map((session) => this.formatSubagentSessionOption(session)));
+
+		if (options.length === 0) {
+			this.showStatus(query ? `No subagents matched: ${query}` : "No delegated child sessions");
+			return;
+		}
+
+		const selected = await this.showExtensionSelector("Subagent Sessions", options);
+		if (!selected) {
+			return;
+		}
+
+		if (selected === "← Return to active session") {
+			this.stopDetachedSessionView();
+			this.chatContainer.clear();
+			this.renderInitialMessages();
+			this.restoreDetachedActiveSessionState();
+			this.showStatus("Returned to active session");
+			return;
+		}
+
+		if (selected === "← Return to root session") {
+			if (navigation.rootSessionFile) {
+				await this.handleResumeSession(navigation.rootSessionFile);
+			}
+			return;
+		}
+
+		const selectedSession = sessions.find((session) => this.formatSubagentSessionOption(session) === selected);
+		if (!selectedSession) {
+			return;
+		}
+
+		const activeSessionFile = this.activeSessionManager.getSessionFile();
+		if (
+			this.session.isStreaming &&
+			activeSessionFile &&
+			selectedSession.reference.sessionFile !== activeSessionFile
+		) {
+			this.openDetachedSessionView(selectedSession.reference.sessionFile);
+			this.showStatus("Viewing detached child session while the active session keeps running");
+			return;
+		}
+
+		await this.handleResumeSession(selectedSession.reference.sessionFile);
+	}
+
 	private showSessionSelector(): void {
 		this.showSelector((done) => {
 			const selector = new SessionSelectorComponent(
@@ -3693,6 +4088,9 @@ export class InteractiveMode {
 	}
 
 	private async handleResumeSession(sessionPath: string): Promise<void> {
+		this.stopDetachedSessionView();
+		this.clearDetachedActiveSessionState();
+
 		// Stop loading animation
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
@@ -4562,6 +4960,7 @@ export class InteractiveMode {
 	}
 
 	stop(): void {
+		this.stopDetachedSessionView();
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;

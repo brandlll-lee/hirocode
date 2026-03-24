@@ -29,6 +29,9 @@ describe("subagent agent discovery", () => {
 name: code-reviewer
 description: Reviews diffs for bugs
 allowSubagents: true
+taskPermissions:
+  reviewer: deny
+  "*": allow
 tools:
   - Read
   - Grep
@@ -46,6 +49,10 @@ Review the provided code and report risks.
 			name: "code-reviewer",
 			description: "Reviews diffs for bugs",
 			allowSubagents: true,
+			taskPermissions: [
+				{ pattern: "reviewer", action: "deny" },
+				{ pattern: "*", action: "allow" },
+			],
 			tools: ["Read", "Grep"],
 			model: "claude-sonnet-4-5",
 			systemPrompt: "Review the provided code and report risks.",
@@ -139,6 +146,8 @@ Project only prompt.
 		const byName = new Map(result.agents.map((agent) => [agent.name, agent]));
 
 		expect(result.projectAgentsDir).toBe(path.join(repoRoot, ".hirocode", "agents"));
+		expect(byName.get("general")?.source).toBe("built-in");
+		expect(byName.get("explore")?.source).toBe("built-in");
 		expect(byName.get("shared")?.source).toBe("project");
 		expect(byName.get("shared")?.systemPrompt).toBe("Project prompt.");
 		expect(byName.get("shared")?.tools).toEqual(["Read", "Glob"]);
@@ -164,14 +173,34 @@ Legacy prompt.
 		);
 
 		const result = discoverAgents(repoRoot, "project");
+		const byName = new Map(result.agents.map((agent) => [agent.name, agent]));
 
 		expect(result.projectAgentsDir).toBe(path.join(repoRoot, ".pi", "agents"));
-		expect(result.agents).toHaveLength(1);
-		expect(result.agents[0]).toMatchObject({
+		expect(byName.get("legacy")).toMatchObject({
 			name: "legacy",
 			description: "Legacy project agent",
 			source: "project",
 			systemPrompt: "Legacy prompt.",
+		});
+		expect(byName.get("general")?.source).toBe("built-in");
+		expect(byName.get("explore")?.source).toBe("built-in");
+	});
+
+	it("includes built-in general and explore agents even without custom files", () => {
+		const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hirocode-built-in-agents-"));
+		process.env[AGENT_DIR_ENV] = path.join(tempRoot, "home-agent");
+
+		const result = discoverAgents(tempRoot, "both");
+		const byName = new Map(result.agents.map((agent) => [agent.name, agent]));
+
+		expect(byName.get("general")).toMatchObject({
+			name: "general",
+			source: "built-in",
+		});
+		expect(byName.get("explore")).toMatchObject({
+			name: "explore",
+			source: "built-in",
+			tools: ["read", "grep", "find", "ls", "bash"],
 		});
 	});
 });

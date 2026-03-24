@@ -2,6 +2,8 @@
 
 Official subprocess-based subagent extension for hirocode. Delegate tasks to specialized subagents with isolated context windows.
 
+This extension registers only `subagent`. Single-task delegation is handled by the built-in `task` tool.
+
 ## Features
 
 - **Isolated context**: Each subagent runs in a separate `hirocode` process
@@ -10,10 +12,8 @@ Official subprocess-based subagent extension for hirocode. Delegate tasks to spe
 - **Markdown rendering**: Final output rendered with proper formatting (expanded view)
 - **Usage tracking**: Shows turns, tokens, cost, and context usage per agent
 - **Abort support**: Ctrl+C propagates to kill subagent processes
-- **Task alias**: Registers both `subagent` and `task` for Claude/Task-style delegation prompts
-- **Persistent transcripts**: Each delegated task gets its own child session file under `~/.hirocode/agent/subagents/`
-- **Resume support**: Reuse `task_id` with the `task` alias to continue an existing child session
-- **Session navigation**: Use `/subagents` to jump into delegated child sessions from the current branch
+- **Built-in task orchestration**: Single/parallel/chain subagent flows run on top of the built-in `task` tool
+- **Built-in navigation**: Use the built-in `/subagents` command to jump into delegated child sessions from the current branch
 
 ## Structure
 
@@ -79,14 +79,11 @@ When running interactively, the tool prompts for confirmation before running pro
 Use scout to find all authentication code
 ```
 
-### Task alias
-```
-Use the task tool with subagent_type "scout" to find all authentication code
-```
+### Built-in task for single delegation
+Use the built-in `task` tool when you only need one delegated child session:
 
-### Resume a previous task
-```
-Use the task tool with task_id "<previous-task-id>" and subagent_type "scout" to continue the authentication scan
+```text
+Use the task tool with subagent_type "scout" to find all authentication code
 ```
 
 ### Parallel execution
@@ -114,45 +111,25 @@ Use a chain: first have scout find the read tool, then have planner suggest impr
 | Parallel | `{ tasks: [...] }` | Multiple agents run concurrently (max 8, 4 concurrent) |
 | Chain | `{ chain: [...] }` | Sequential with `{previous}` placeholder |
 
-`task` is a single-task alias with Claude/Task-style parameters:
+`subagent` is the orchestration layer. Use it for:
 
-```json
-{
-  "description": "Auth code discovery",
-  "prompt": "Find all authentication-related code paths",
-  "subagent_type": "scout"
-}
-```
+- single `{ agent, task }` delegation when you want subagent-specific UI and summaries
+- parallel `{ tasks: [...] }` fan-out
+- chain `{ chain: [...] }` sequential workflows with `{previous}` handoff
 
-The extension returns `task_id` and `subagent_id` in Task tool results, and includes child task IDs in `subagent` summaries so the parent agent can hand work back to a specific child later. Resume only works for tasks previously created by this extension.
-
-New task runs pre-create the child session with the same id used for `task_id`, so resume tokens now line up with the child session identity. Older runs may still surface a separate `subagent_id`.
+Use the built-in `task` tool for plain single-task delegation, resume via `task_id`, and direct child-session navigation.
 
 ## Child session storage
 
-Delegated task transcripts are stored separately from the parent conversation:
+Subagent runs now execute through the built-in `task` tool, so delegated child sessions use hirocode's standard session storage and navigation model.
 
-```text
-~/.hirocode/agent/subagents/<parent-session-id>/
-  task-<task-id>.json
-  task-<task-id>.jsonl
-```
-
-- `task-<task-id>.json` stores task metadata used for resume
-- `task-<task-id>.jsonl` is the child hirocode session transcript
-- the parent tool result keeps only linkage metadata and the summarized output
+For legacy extension-created task runs, the extension still recognizes the older `~/.hirocode/agent/subagents/...` metadata layout when checking nested delegation safeguards.
 
 ## Session switching
 
-`/subagents` switches directly into the selected child session.
+The built-in `/subagents` command handles child-session navigation for both built-in `task` and extension `subagent` runs.
 
-If multiple child sessions exist on the current branch, the command first lets you choose which one to open.
-
-If the selected child is still running, you get two options:
-- wait until the current parent turn is idle, then switch safely
-- or switch immediately and interrupt the current work
-
-This keeps navigation simple while still making it explicit when a direct switch would stop the current top-level turn.
+It now navigates through the persisted parent/root session tree, so you can switch among sibling and descendant child sessions even after entering one of them.
 
 ## Output Display
 

@@ -65,7 +65,15 @@ describe("Coding Agent Tools", () => {
 	});
 
 	it("should include web tools in the default coding tool set", () => {
-		expect(codingTools.map((tool) => tool.name)).toEqual(["read", "bash", "edit", "write", "webfetch", "websearch"]);
+		expect(codingTools.map((tool) => tool.name)).toEqual([
+			"read",
+			"bash",
+			"edit",
+			"write",
+			"webfetch",
+			"websearch",
+			"task",
+		]);
 	});
 
 	describe("read tool", () => {

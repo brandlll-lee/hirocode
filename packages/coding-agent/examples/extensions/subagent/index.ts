@@ -12,54 +12,26 @@
  * Uses JSON mode to capture structured output from subagents.
  */
 
-import { spawn } from "node:child_process";
-import * as fs from "node:fs";
 import * as os from "node:os";
-import * as path from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { AgentToolResult } from "../../../../agent/src/index.js";
 import { type Api, type Message, type Model, StringEnum } from "../../../../ai/src/index.js";
 import { Container, Loader, Markdown, Spacer, Text } from "../../../../tui/src/index.js";
 import type { ExtensionAPI, ToolDefinition } from "../../../src/core/extensions/types.js";
-import type { SessionEntry } from "../../../src/core/session-manager.js";
-import { withFileMutationQueue } from "../../../src/core/tools/file-mutation-queue.js";
+import { formatModelReference, resolveEffectiveSubagentModel } from "../../../src/core/subagents/invocation.js";
+import { codingTools } from "../../../src/core/tools/index.js";
+import { createTaskToolDefinition } from "../../../src/core/tools/task.js";
 import { getMarkdownTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.js";
-import {
-	createTaskReference,
-	findStoredTaskReferenceInBranch,
-	findStoredTaskReferenceOnDisk,
-	formatTaskReferenceLines,
-	formatTaskToolOutput,
-	initializeTaskSession,
-	isSubagentSessionFile,
-	persistTaskReference,
-	type StoredTaskReference,
-} from "./task-persistence.js";
+import { findStoredTaskReferenceOnDisk, formatTaskReferenceLines, isSubagentSessionFile } from "./task-persistence.js";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
-const PRIMARY_CLI_NAME = "hirocode";
-const NPX_BINARY = process.platform === "win32" ? "npx.cmd" : "npx";
-const TSX_CLI_RELATIVE_PATH = path.join("node_modules", "tsx", "dist", "cli.mjs");
-const SUBAGENT_RECORD_ENTRY_TYPE = "subagent-record";
 
 type RenderTheme = Parameters<NonNullable<ToolDefinition["renderCall"]>>[1];
 type RenderResultOptions = Parameters<NonNullable<ToolDefinition["renderResult"]>>[1];
 type ParentModelReference = Pick<Model<Api>, "provider" | "id">;
-
-export function formatModelReference(provider: string | undefined, modelId: string | undefined): string | undefined {
-	if (!modelId) {
-		return undefined;
-	}
-
-	if (!provider) {
-		return modelId;
-	}
-
-	return `${provider}/${modelId}`;
-}
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -94,45 +66,6 @@ function formatUsageStats(
 	const modelReference = formatModelReference(provider, model);
 	if (modelReference) parts.push(modelReference);
 	return parts.join(" ");
-}
-
-export function resolveEffectiveSubagentModel(
-	agentModel: string | undefined,
-	parentModel: ParentModelReference | undefined,
-	storedTask?: Pick<StoredTaskReference, "provider" | "model">,
-): { provider?: string; modelId?: string; modelArg?: string } {
-	if (storedTask?.model) {
-		return {
-			provider: storedTask.provider,
-			modelId: storedTask.model,
-			modelArg: formatModelReference(storedTask.provider, storedTask.model) ?? storedTask.model,
-		};
-	}
-
-	if (agentModel) {
-		const slashIndex = agentModel.indexOf("/");
-		if (slashIndex !== -1) {
-			const provider = agentModel.slice(0, slashIndex).trim();
-			const modelId = agentModel.slice(slashIndex + 1).trim();
-			return {
-				provider: provider || undefined,
-				modelId: modelId || agentModel,
-				modelArg: agentModel,
-			};
-		}
-
-		return { modelId: agentModel, modelArg: agentModel };
-	}
-
-	if (parentModel) {
-		return {
-			provider: parentModel.provider,
-			modelId: parentModel.id,
-			modelArg: `${parentModel.provider}/${parentModel.id}`,
-		};
-	}
-
-	return {};
 }
 
 function formatToolCall(
@@ -221,7 +154,7 @@ interface SingleResult {
 	metadataFile?: string;
 	provider?: string;
 	agent: string;
-	agentSource: "user" | "project" | "unknown";
+	agentSource: "built-in" | "user" | "project" | "unknown";
 	task: string;
 	exitCode: number;
 	messages: Message[];
@@ -259,51 +192,6 @@ interface DelegationParams {
 	cwd?: string;
 }
 
-interface TaskAliasParams {
-	description: string;
-	prompt: string;
-	subagent_type: string;
-	task_id?: string;
-	command?: string;
-	cwd?: string;
-	agentScope?: AgentScope;
-	confirmProjectAgents?: boolean;
-}
-
-interface SubagentRecord {
-	toolName: "subagent" | "task";
-	mode: SubagentDetails["mode"];
-	taskId: string;
-	sessionId?: string;
-	sessionFile: string;
-	metadataFile: string;
-	parentSessionId: string;
-	agent: string;
-	agentSource: "user" | "project" | "unknown";
-	task: string;
-	status: "running" | "completed" | "failed" | "error" | "aborted";
-	step?: number;
-}
-
-function isSubagentRecord(value: unknown): value is SubagentRecord {
-	if (!value || typeof value !== "object") {
-		return false;
-	}
-
-	const record = value as SubagentRecord;
-	return (
-		typeof record.toolName === "string" &&
-		typeof record.mode === "string" &&
-		typeof record.taskId === "string" &&
-		typeof record.sessionFile === "string" &&
-		typeof record.metadataFile === "string" &&
-		typeof record.parentSessionId === "string" &&
-		typeof record.agent === "string" &&
-		typeof record.task === "string" &&
-		typeof record.status === "string"
-	);
-}
-
 function getFinalOutput(messages: Message[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
@@ -339,133 +227,16 @@ function formatReferenceHeader(result: SingleResult): string | undefined {
 	return formatTaskReferenceLines({ taskId: result.taskId, sessionId: result.sessionId }).join("\n");
 }
 
-function getSubagentStatus(result: SingleResult): SubagentRecord["status"] {
-	if (result.stopReason === "aborted") {
-		return "aborted";
-	}
-
-	if (result.stopReason === "error") {
-		return "error";
-	}
-
-	return result.exitCode === 0 ? "completed" : "failed";
-}
-
-function createSubagentRecord(
-	toolName: SubagentRecord["toolName"],
-	mode: SubagentRecord["mode"],
-	result: SingleResult,
-	status: SubagentRecord["status"] = getSubagentStatus(result),
-): SubagentRecord | undefined {
-	if (!result.taskId || !result.sessionFile || !result.metadataFile || !result.parentSessionId) {
-		return undefined;
-	}
-
-	return {
-		toolName,
-		mode,
-		taskId: result.taskId,
-		sessionId: result.sessionId,
-		sessionFile: result.sessionFile,
-		metadataFile: result.metadataFile,
-		parentSessionId: result.parentSessionId,
-		agent: result.agent,
-		agentSource: result.agentSource,
-		task: result.task,
-		status,
-		step: result.step,
-	};
-}
-
-function getSubagentRecordKey(record: Pick<SubagentRecord, "taskId" | "sessionId">): string {
-	return record.sessionId ?? record.taskId;
-}
-
-function getSubagentStatusWeight(status: SubagentRecord["status"]): number {
-	switch (status) {
-		case "running":
-			return 0;
-		case "completed":
-			return 1;
-		case "aborted":
-			return 2;
-		case "error":
-			return 3;
-		case "failed":
-			return 4;
-	}
-}
-
-function sortSubagentRecords(records: Array<{ entryId: string; record: SubagentRecord }>): Array<{
-	entryId: string;
-	record: SubagentRecord;
-}> {
-	return [...records].sort(
-		(left, right) => getSubagentStatusWeight(left.record.status) - getSubagentStatusWeight(right.record.status),
-	);
-}
-
-function findLatestSubagentRecord(
-	entries: SessionEntry[],
-	match: Pick<SubagentRecord, "taskId" | "sessionId">,
-): SubagentRecord | undefined {
-	const key = getSubagentRecordKey(match);
-	return getLatestSubagentRecords(entries).find(({ record }) => getSubagentRecordKey(record) === key)?.record;
-}
-
-function getSubagentTreeLabel(toolName: string, details: SubagentDetails): string | undefined {
+function getSubagentTreeLabel(details: SubagentDetails): string | undefined {
 	if (details.results.length === 0) {
 		return undefined;
 	}
 
 	if (details.mode === "single" && details.results.length === 1) {
-		return `${toolName}:${details.results[0].agent}`;
+		return `subagent:${details.results[0].agent}`;
 	}
 
-	return `${toolName}:${details.mode}-${details.results.length}`;
-}
-
-function getLatestSubagentRecords(entries: SessionEntry[]): Array<{ entryId: string; record: SubagentRecord }> {
-	const latest = new Map<string, { entryId: string; record: SubagentRecord }>();
-
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i];
-		if (entry.type !== "custom" || entry.customType !== SUBAGENT_RECORD_ENTRY_TYPE || !isSubagentRecord(entry.data)) {
-			continue;
-		}
-
-		const key = entry.data.sessionId ?? entry.data.taskId;
-		if (!latest.has(key)) {
-			latest.set(key, { entryId: entry.id, record: entry.data });
-		}
-	}
-
-	return Array.from(latest.values());
-}
-
-function matchesSubagentRecord(record: SubagentRecord, query: string): boolean {
-	const normalized = query.trim().toLowerCase();
-	if (!normalized) {
-		return true;
-	}
-
-	return [record.agent, record.task, record.taskId, record.sessionId, record.status]
-		.filter((value): value is string => Boolean(value))
-		.some((value) => value.toLowerCase().includes(normalized));
-}
-
-function formatSubagentRecord(record: SubagentRecord): string {
-	const icon =
-		record.status === "running"
-			? "⏳"
-			: record.status === "completed"
-				? "✓"
-				: record.status === "aborted"
-					? "⏹"
-					: "✗";
-	const scope = `${record.agent} (${record.agentSource})`;
-	const preview = record.task.length > 70 ? `${record.task.slice(0, 70)}...` : record.task;
-	return `${icon} ${scope} - ${preview}`;
+	return `subagent:${details.mode}-${details.results.length}`;
 }
 
 async function mapWithConcurrencyLimit<TIn, TOut>(
@@ -488,100 +259,25 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 	return results;
 }
 
-async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
-	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "hirocode-subagent-"));
-	const safeName = agentName.replace(/[^\w.-]+/g, "_");
-	const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
-	await withFileMutationQueue(filePath, async () => {
-		await fs.promises.writeFile(filePath, prompt, { encoding: "utf-8", mode: 0o600 });
-	});
-	return { dir: tmpDir, filePath };
-}
-
-function isTypeScriptEntrypoint(filePath: string): boolean {
-	const ext = path.extname(filePath).toLowerCase();
-	return ext === ".ts" || ext === ".mts" || ext === ".cts";
-}
-
-function findLocalTsxCliEntrypoint(startDir: string): string | undefined {
-	let currentDir = startDir;
-	while (true) {
-		const candidate = path.join(currentDir, TSX_CLI_RELATIVE_PATH);
-		if (fs.existsSync(candidate)) {
-			return candidate;
-		}
-
-		const parentDir = path.dirname(currentDir);
-		if (parentDir === currentDir) {
-			return undefined;
-		}
-		currentDir = parentDir;
-	}
-}
-
-export function resolveAgentInvocation(
-	args: string[],
-	options?: { currentScript?: string; execPath?: string },
-): { command: string; args: string[] } {
-	const currentScript = options?.currentScript ?? process.argv[1];
-	const execPath = options?.execPath ?? process.execPath;
-	const execName = path.basename(execPath).toLowerCase();
-	const isNodeRuntime = /^(node)(\.exe)?$/.test(execName);
-	const isBunRuntime = /^(bun)(\.exe)?$/.test(execName);
-
-	if (currentScript && fs.existsSync(currentScript)) {
-		if (isNodeRuntime && isTypeScriptEntrypoint(currentScript)) {
-			const localTsxCli = findLocalTsxCliEntrypoint(path.dirname(currentScript));
-			if (localTsxCli) {
-				return { command: execPath, args: [localTsxCli, currentScript, ...args] };
-			}
-			return { command: NPX_BINARY, args: ["tsx", currentScript, ...args] };
-		}
-
-		return { command: execPath, args: [currentScript, ...args] };
-	}
-
-	if (!isNodeRuntime && !isBunRuntime) {
-		return { command: execPath, args };
-	}
-
-	return { command: PRIMARY_CLI_NAME, args };
-}
-
-function getAgentInvocation(args: string[]): { command: string; args: string[] } {
-	return resolveAgentInvocation(args);
-}
-
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
-type OnStartCallback = (result: SingleResult) => void;
 
 async function runSingleAgent(
 	parentSessionId: string,
-	parentSessionFile: string | undefined,
 	defaultCwd: string,
 	agents: AgentConfig[],
 	parentModel: ParentModelReference | undefined,
+	agentScope: AgentScope,
 	agentName: string,
 	task: string,
 	cwd: string | undefined,
 	step: number | undefined,
 	signal: AbortSignal | undefined,
-	onStart: OnStartCallback | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
-	storedTask?: StoredTaskReference,
+	toolContext: Parameters<ToolDefinition["execute"]>[4],
 ): Promise<SingleResult> {
 	const discoveredAgent = agents.find((candidate) => candidate.name === agentName);
-	const agent = storedTask
-		? {
-				name: storedTask.agent,
-				source: storedTask.agentSource,
-				allowSubagents: storedTask.allowSubagents,
-				model: storedTask.model,
-				tools: storedTask.tools,
-				systemPrompt: storedTask.systemPrompt ?? "",
-			}
-		: discoveredAgent;
+	const agent = discoveredAgent;
 
 	if (!agent) {
 		const available = agents.map((a) => `"${a.name}"`).join(", ") || "none";
@@ -597,193 +293,67 @@ async function runSingleAgent(
 		};
 	}
 
-	const effectiveModel = resolveEffectiveSubagentModel(discoveredAgent?.model, parentModel, storedTask);
+	const effectiveModel = resolveEffectiveSubagentModel(discoveredAgent?.model, parentModel);
+	const taskTool = createTaskToolDefinition(defaultCwd, {
+		getParentActiveToolNames: () => codingTools.map((tool) => tool.name),
+	});
 
-	const taskRef =
-		storedTask ??
-		createTaskReference(parentSessionId, {
-			agent: agent.name,
-			agentSource: agent.source,
-			allowSubagents: agent.allowSubagents,
+	const taskResult = await taskTool.execute(
+		`subagent-${step ?? 0}-${agentName}`,
+		{
+			description: `${agentName} delegated task`,
+			prompt: task,
+			subagent_type: agentName,
+			cwd,
+			agentScope,
+			confirmProjectAgents: false,
+		},
+		signal,
+		(partial) => {
+			const delegated = partial.details?.result;
+			if (!delegated || !onUpdate) {
+				return;
+			}
+			const partialResult: SingleResult = {
+				...delegated,
+				metadataFile: delegated.sessionFile,
+				step,
+			};
+			onUpdate({
+				content: partial.content,
+				details: makeDetails([partialResult]),
+			});
+		},
+		toolContext,
+	);
+
+	const delegated = taskResult.details?.result;
+	if (!delegated) {
+		const text = taskResult.content[0]?.type === "text" ? taskResult.content[0].text : "(no output)";
+		return {
+			parentSessionId,
 			provider: effectiveModel.provider,
+			agent: agentName,
+			agentSource: agent.source,
+			task,
+			exitCode: 1,
+			messages: [],
+			stderr: text ?? "",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 			model: effectiveModel.modelId,
 			tools: agent.tools,
 			systemPrompt: agent.systemPrompt,
-		});
-	initializeTaskSession(taskRef, cwd ?? defaultCwd, parentSessionFile);
-	persistTaskReference(taskRef);
-
-	const args: string[] = ["--mode", "json", "-p", "--session", taskRef.sessionFile];
-	const configuredTools = agent.allowSubagents
-		? agent.tools
-		: agent.tools?.filter((toolName) => {
-				const normalized = toolName.toLowerCase();
-				return normalized !== "task" && normalized !== "subagent";
-			});
-	if (effectiveModel.modelArg) args.push("--model", effectiveModel.modelArg);
-	if (configuredTools && configuredTools.length > 0) args.push("--tools", configuredTools.join(","));
-	if (configuredTools && configuredTools.length === 0) args.push("--no-tools");
-
-	let tmpPromptDir: string | null = null;
-	let tmpPromptPath: string | null = null;
+			resumed: false,
+			step,
+		};
+	}
 
 	const currentResult: SingleResult = {
-		taskId: taskRef.taskId,
-		parentSessionId: taskRef.parentSessionId,
-		sessionId: taskRef.sessionId,
-		sessionFile: taskRef.sessionFile,
-		metadataFile: taskRef.metadataFile,
-		provider: effectiveModel.provider,
-		agent: agentName,
-		agentSource: agent.source,
-		task,
-		exitCode: 0,
-		messages: [],
-		stderr: "",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-		model: effectiveModel.modelId,
-		tools: configuredTools,
-		systemPrompt: agent.systemPrompt,
-		resumed: Boolean(storedTask),
+		...delegated,
+		metadataFile: delegated.sessionFile,
 		step,
 	};
-
-	const emitUpdate = () => {
-		if (onUpdate) {
-			onUpdate({
-				content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
-				details: makeDetails([currentResult]),
-			});
-		}
-	};
-	onStart?.(currentResult);
-
-	try {
-		if (agent.systemPrompt.trim()) {
-			const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
-			tmpPromptDir = tmp.dir;
-			tmpPromptPath = tmp.filePath;
-			args.push("--append-system-prompt", tmpPromptPath);
-		}
-
-		args.push(`Task: ${task}`);
-		let wasAborted = false;
-
-		const exitCode = await new Promise<number>((resolve) => {
-			const invocation = getAgentInvocation(args);
-			const proc = spawn(invocation.command, invocation.args, {
-				cwd: cwd ?? defaultCwd,
-				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
-			});
-			let buffer = "";
-
-			const processLine = (line: string) => {
-				if (!line.trim()) return;
-				let event: any;
-				try {
-					event = JSON.parse(line);
-				} catch {
-					return;
-				}
-
-				if (event.type === "session") {
-					currentResult.sessionId = typeof event.id === "string" ? event.id : currentResult.sessionId;
-					persistTaskReference({
-						...taskRef,
-						provider: currentResult.provider,
-						model: currentResult.model,
-						sessionId: currentResult.sessionId,
-					});
-					return;
-				}
-
-				if (event.type === "message_end" && event.message) {
-					const msg = event.message as Message;
-					currentResult.messages.push(msg);
-
-					if (msg.role === "assistant") {
-						currentResult.usage.turns++;
-						const usage = msg.usage;
-						if (usage) {
-							currentResult.usage.input += usage.input || 0;
-							currentResult.usage.output += usage.output || 0;
-							currentResult.usage.cacheRead += usage.cacheRead || 0;
-							currentResult.usage.cacheWrite += usage.cacheWrite || 0;
-							currentResult.usage.cost += usage.cost?.total || 0;
-							currentResult.usage.contextTokens = usage.totalTokens || 0;
-						}
-						if (!currentResult.model && msg.model) currentResult.model = msg.model;
-						if (!currentResult.provider && typeof msg.provider === "string")
-							currentResult.provider = msg.provider;
-						if (msg.stopReason) currentResult.stopReason = msg.stopReason;
-						if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
-					}
-					emitUpdate();
-				}
-
-				if (event.type === "tool_result_end" && event.message) {
-					currentResult.messages.push(event.message as Message);
-					emitUpdate();
-				}
-			};
-
-			proc.stdout.on("data", (data) => {
-				buffer += data.toString();
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-				for (const line of lines) processLine(line);
-			});
-
-			proc.stderr.on("data", (data) => {
-				currentResult.stderr += data.toString();
-			});
-
-			proc.on("close", (code) => {
-				if (buffer.trim()) processLine(buffer);
-				resolve(code ?? 0);
-			});
-
-			proc.on("error", () => {
-				resolve(1);
-			});
-
-			if (signal) {
-				const killProc = () => {
-					wasAborted = true;
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
-				};
-				if (signal.aborted) killProc();
-				else signal.addEventListener("abort", killProc, { once: true });
-			}
-		});
-
-		currentResult.exitCode = exitCode;
-		persistTaskReference({
-			...taskRef,
-			provider: currentResult.provider,
-			model: currentResult.model,
-			sessionId: currentResult.sessionId,
-		});
-		if (wasAborted) throw new Error("Subagent was aborted");
-		return currentResult;
-	} finally {
-		if (tmpPromptPath)
-			try {
-				fs.unlinkSync(tmpPromptPath);
-			} catch {
-				/* ignore */
-			}
-		if (tmpPromptDir)
-			try {
-				fs.rmdirSync(tmpPromptDir);
-			} catch {
-				/* ignore */
-			}
-	}
+	return currentResult;
 }
 
 const TaskItem = Type.Object({
@@ -814,34 +384,6 @@ const SubagentParams = Type.Object({
 	),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 });
-
-const TaskToolParams = Type.Object({
-	description: Type.String({ description: "A short description of the delegated task" }),
-	prompt: Type.String({ description: "The task for the subagent to perform" }),
-	subagent_type: Type.String({ description: "The name of the subagent to invoke" }),
-	task_id: Type.Optional(
-		Type.String({
-			description:
-				"Resume a delegated task created by this extension. Pass a prior task_id to continue the same child session.",
-		}),
-	),
-	command: Type.Optional(Type.String({ description: "Optional command that triggered this task" })),
-	agentScope: Type.Optional(AgentScopeSchema),
-	confirmProjectAgents: Type.Optional(
-		Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
-	),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the subagent process" })),
-});
-
-function normalizeTaskAliasParams(params: TaskAliasParams): DelegationParams {
-	return {
-		agent: params.subagent_type,
-		task: params.prompt,
-		cwd: params.cwd,
-		agentScope: params.agentScope,
-		confirmProjectAgents: params.confirmProjectAgents,
-	};
-}
 
 function formatDelegationCallText(title: string, args: DelegationParams, theme: RenderTheme): string {
 	const scope: AgentScope = args.agentScope ?? "user";
@@ -1211,11 +753,8 @@ async function executeDelegationTool(
 	signal: AbortSignal | undefined,
 	onUpdate: ((partial: AgentToolResult<SubagentDetails>) => void) | undefined,
 	ctx: Parameters<ToolDefinition["execute"]>[4],
-	storedTask?: StoredTaskReference,
-	onTaskStart?: (mode: SubagentDetails["mode"], result: SingleResult) => void,
 ): Promise<AgentToolResult<SubagentDetails>> {
 	const parentSessionId = ctx.sessionManager.getSessionId();
-	const parentSessionFile = ctx.sessionManager.getSessionFile();
 	const parentModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
 	const agentScope: AgentScope = params.agentScope ?? "user";
 	const discovery = discoverAgents(ctx.cwd, agentScope);
@@ -1246,7 +785,7 @@ async function executeDelegationTool(
 		};
 	}
 
-	if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI && !storedTask) {
+	if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
 		const requestedAgentNames = new Set<string>();
 		if (params.chain) for (const step of params.chain) requestedAgentNames.add(step.agent);
 		if (params.tasks) for (const task of params.tasks) requestedAgentNames.add(task.agent);
@@ -1293,18 +832,18 @@ async function executeDelegationTool(
 
 			const result = await runSingleAgent(
 				parentSessionId,
-				parentSessionFile,
 				ctx.cwd,
 				agents,
 				parentModel,
+				agentScope,
 				step.agent,
 				taskWithContext,
 				step.cwd,
 				i + 1,
 				signal,
-				(partialResult) => onTaskStart?.("chain", partialResult),
 				chainUpdate,
 				makeDetails("chain"),
+				ctx,
 			);
 			results.push(result);
 
@@ -1384,16 +923,15 @@ async function executeDelegationTool(
 		const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (task, index) => {
 			const result = await runSingleAgent(
 				parentSessionId,
-				parentSessionFile,
 				ctx.cwd,
 				agents,
 				parentModel,
+				agentScope,
 				task.agent,
 				task.task,
 				task.cwd,
 				undefined,
 				signal,
-				(partialResult) => onTaskStart?.("parallel", partialResult),
 				(partial) => {
 					if (partial.details?.results[0]) {
 						allResults[index] = partial.details.results[0];
@@ -1401,6 +939,7 @@ async function executeDelegationTool(
 					}
 				},
 				makeDetails("parallel"),
+				ctx,
 			);
 			allResults[index] = result;
 			emitParallelUpdate();
@@ -1427,34 +966,20 @@ async function executeDelegationTool(
 	}
 
 	if (params.agent && params.task) {
-		if (storedTask?.agentSource === "project" && confirmProjectAgents && ctx.hasUI) {
-			const ok = await ctx.ui.confirm(
-				"Resume project-local agent?",
-				`Agent: ${storedTask.agent}\nSource: ${storedTask.sessionFile}\n\nThis task was created from a project-local agent. Only continue for trusted repositories.`,
-			);
-			if (!ok) {
-				return {
-					content: [{ type: "text", text: "Canceled: project-local agent resume not approved." }],
-					details: makeDetails("single")([]),
-				};
-			}
-		}
-
 		const result = await runSingleAgent(
 			parentSessionId,
-			parentSessionFile,
 			ctx.cwd,
 			agents,
 			parentModel,
+			agentScope,
 			params.agent,
 			params.task,
 			params.cwd,
 			undefined,
 			signal,
-			(partialResult) => onTaskStart?.("single", partialResult),
 			onUpdate,
 			makeDetails("single"),
-			storedTask,
+			ctx,
 		);
 		const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 		const refHeader = formatReferenceHeader(result);
@@ -1488,73 +1013,9 @@ async function executeDelegationTool(
 	};
 }
 
-function registerSubagentCommands(pi: ExtensionAPI): void {
-	pi.registerCommand("subagents", {
-		description: "View or open delegated subagent sessions from this branch",
-		handler: async (args, ctx) => {
-			const records = sortSubagentRecords(getLatestSubagentRecords(ctx.sessionManager.getBranch())).filter(
-				({ record }) => matchesSubagentRecord(record, args),
-			);
-
-			if (records.length === 0) {
-				ctx.ui.notify(
-					args.trim() ? `No subagents matched: ${args.trim()}` : "No delegated subagents in this branch",
-					"info",
-				);
-				return;
-			}
-
-			const openRecord = async (record: SubagentRecord) => {
-				if (!fs.existsSync(record.sessionFile)) {
-					ctx.ui.notify(`Session file not found: ${record.sessionFile}`, "error");
-					return;
-				}
-				await ctx.switchSession(record.sessionFile);
-			};
-
-			const switchToRecord = async (record: SubagentRecord) => {
-				const latestRecord = findLatestSubagentRecord(ctx.sessionManager.getBranch(), record) ?? record;
-				if (latestRecord.status === "running" && ctx.hasUI) {
-					const choice = await ctx.ui.select("Open running subagent session?", [
-						"Wait until idle (Recommended)",
-						"Open now and interrupt current work",
-					]);
-					if (!choice) {
-						return;
-					}
-					if (choice.startsWith("Wait until idle")) {
-						ctx.ui.notify("Waiting for the current turn to finish before opening the child session...", "info");
-						await ctx.waitForIdle();
-					}
-				}
-
-				await openRecord(latestRecord);
-			};
-
-			if (records.length === 1 || !ctx.hasUI) {
-				await switchToRecord(records[0].record);
-				return;
-			}
-
-			const options = records.map(({ record }) => formatSubagentRecord(record));
-			const selected = await ctx.ui.select("Subagent Sessions", options);
-			if (!selected) {
-				return;
-			}
-
-			const selectedRecord = records.find(({ record }) => formatSubagentRecord(record) === selected);
-			if (!selectedRecord) {
-				return;
-			}
-
-			await switchToRecord(selectedRecord.record);
-		},
-	});
-}
-
 function registerSubagentSessionTracking(pi: ExtensionAPI): void {
 	pi.on("tool_call", async (event, ctx) => {
-		if (event.toolName !== "subagent" && event.toolName !== "task") {
+		if (event.toolName !== "subagent") {
 			return;
 		}
 
@@ -1575,7 +1036,7 @@ function registerSubagentSessionTracking(pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
-		if (event.toolName !== "subagent" && event.toolName !== "task") {
+		if (event.toolName !== "subagent") {
 			return;
 		}
 
@@ -1585,23 +1046,16 @@ function registerSubagentSessionTracking(pi: ExtensionAPI): void {
 		}
 
 		const leaf = ctx.sessionManager.getLeafEntry();
-		for (const result of details.results) {
-			const record = createSubagentRecord(event.toolName, details.mode, result);
-			if (record) {
-				pi.appendEntry(SUBAGENT_RECORD_ENTRY_TYPE, record);
-			}
-		}
-
 		if (!leaf) {
 			return;
 		}
 
 		const currentLabel = ctx.sessionManager.getLabel(leaf.id);
-		if (currentLabel && !currentLabel.startsWith("subagent") && !currentLabel.startsWith("task")) {
+		if (currentLabel && !currentLabel.startsWith("subagent")) {
 			return;
 		}
 
-		const label = getSubagentTreeLabel(event.toolName, details);
+		const label = getSubagentTreeLabel(details);
 		if (label) {
 			pi.setLabel(leaf.id, label);
 		}
@@ -1609,7 +1063,6 @@ function registerSubagentSessionTracking(pi: ExtensionAPI): void {
 }
 
 export function registerSubagentTools(pi: ExtensionAPI): void {
-	registerSubagentCommands(pi);
 	registerSubagentSessionTracking(pi);
 
 	const sharedGuidelines = [
@@ -1633,12 +1086,7 @@ export function registerSubagentTools(pi: ExtensionAPI): void {
 		surfaceBackground: "toolPendingBg",
 		parameters: SubagentParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			return executeDelegationTool(params, signal, onUpdate, ctx, undefined, (mode, result) => {
-				const record = createSubagentRecord("subagent", mode, result, "running");
-				if (record) {
-					pi.appendEntry(SUBAGENT_RECORD_ENTRY_TYPE, record);
-				}
-			});
+			return executeDelegationTool(params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme, context) {
 			return renderDelegationCallComponent("subagent", args, theme, context);
@@ -1648,123 +1096,6 @@ export function registerSubagentTools(pi: ExtensionAPI): void {
 		},
 	};
 	pi.registerTool(subagentTool);
-
-	const taskTool: ToolDefinition<typeof TaskToolParams, SubagentDetails> = {
-		name: "task",
-		label: "Task",
-		description:
-			"Task-tool-compatible alias for delegating one focused task to a specialized hirocode subagent with isolated context.",
-		promptSnippet: "Delegate one focused task to a specialized subagent",
-		promptGuidelines: ["Use task for a single delegated unit of work with one subagent_type.", ...sharedGuidelines],
-		surfaceStyle: "boxed",
-		surfaceBackground: "toolPendingBg",
-		parameters: TaskToolParams,
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const storedTask = params.task_id
-				? (findStoredTaskReferenceInBranch(ctx.sessionManager.getBranch(), params.task_id) ??
-					findStoredTaskReferenceOnDisk(params.task_id, ctx.sessionManager.getSessionId()))
-				: undefined;
-
-			if (params.task_id) {
-				if (!storedTask) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Unknown task_id ${params.task_id}. Resume only works for task runs created by this extension.`,
-							},
-						],
-						details: {
-							mode: "single",
-							agentScope: params.agentScope ?? "user",
-							projectAgentsDir: null,
-							results: [],
-						},
-					};
-				}
-
-				if (storedTask.agent !== params.subagent_type) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `task_id ${params.task_id} belongs to subagent ${storedTask.agent}, but this request asked for ${params.subagent_type}. Resume the original subagent or start a fresh task.`,
-							},
-						],
-						details: {
-							mode: "single",
-							agentScope: params.agentScope ?? "user",
-							projectAgentsDir: null,
-							results: [],
-						},
-					};
-				}
-			}
-
-			const result = await executeDelegationTool(
-				normalizeTaskAliasParams(params),
-				signal,
-				onUpdate,
-				ctx,
-				storedTask,
-				(mode, singleResult) => {
-					const record = createSubagentRecord("task", mode, singleResult, "running");
-					if (record) {
-						pi.appendEntry(SUBAGENT_RECORD_ENTRY_TYPE, record);
-					}
-				},
-			);
-			const single = result.details.results[0];
-			if (!single?.taskId) {
-				return result;
-			}
-
-			const summary =
-				single.errorMessage ||
-				getFinalOutput(single.messages) ||
-				(result.content[0]?.type === "text" ? result.content[0].text : "(no output)");
-			return {
-				content: [
-					{
-						type: "text",
-						text: formatTaskToolOutput({ taskId: single.taskId, sessionId: single.sessionId }, summary),
-					},
-				],
-				details: result.details,
-			};
-		},
-		renderCall(args, theme, context) {
-			let text = formatDelegationCallText(
-				"task",
-				{
-					agent: args.subagent_type,
-					task: args.prompt,
-					cwd: args.cwd,
-					agentScope: args.agentScope,
-				},
-				theme,
-			);
-			if (args.task_id) {
-				text += `\n  ${theme.fg("muted", "resume ")}${theme.fg("dim", args.task_id)}`;
-			}
-			return renderDelegationCallComponent(
-				"task",
-				{
-					agent: args.subagent_type,
-					task: args.prompt,
-					cwd: args.cwd,
-					agentScope: args.agentScope,
-				},
-				theme,
-				context,
-				text,
-			);
-		},
-		renderResult(result, options, theme) {
-			return renderDelegationResult(result, options, theme);
-		},
-	};
-	pi.registerTool(taskTool);
 }
 
 export default function (pi: ExtensionAPI) {

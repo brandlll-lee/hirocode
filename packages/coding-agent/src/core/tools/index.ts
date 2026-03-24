@@ -63,6 +63,15 @@ export {
 	readToolDefinition,
 } from "./read.js";
 export {
+	createTaskTool,
+	createTaskToolDefinition,
+	type TaskToolDetails,
+	type TaskToolInput,
+	taskTool,
+	taskToolDefinition,
+	taskToolSchema,
+} from "./task.js";
+export {
 	createTodoWriteTool,
 	createTodoWriteToolDefinition,
 	type TodoItem,
@@ -127,6 +136,13 @@ import {
 	readTool,
 	readToolDefinition,
 } from "./read.js";
+import {
+	createTaskTool,
+	createTaskToolDefinition,
+	type TaskToolOptions,
+	taskTool,
+	taskToolDefinition,
+} from "./task.js";
 import { createTodoWriteTool, createTodoWriteToolDefinition, todoWriteTool, todoWriteToolDefinition } from "./todo.js";
 import { createWebFetchTool, createWebFetchToolDefinition, webFetchTool, webFetchToolDefinition } from "./webfetch.js";
 import {
@@ -140,7 +156,7 @@ import { createWriteTool, createWriteToolDefinition, writeTool, writeToolDefinit
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
 
-export const codingTools: Tool[] = [readTool, bashTool, editTool, writeTool, webFetchTool, webSearchTool];
+export const codingTools: Tool[] = [readTool, bashTool, editTool, writeTool, webFetchTool, webSearchTool, taskTool];
 export const readOnlyTools: Tool[] = [readTool, grepTool, findTool, lsTool];
 
 export const allTools = {
@@ -148,6 +164,7 @@ export const allTools = {
 	bash: bashTool,
 	edit: editTool,
 	write: writeTool,
+	task: taskTool,
 	todowrite: todoWriteTool,
 	grep: grepTool,
 	find: findTool,
@@ -161,6 +178,7 @@ export const allToolDefinitions = {
 	bash: bashToolDefinition,
 	edit: editToolDefinition,
 	write: writeToolDefinition,
+	task: taskToolDefinition,
 	todowrite: todoWriteToolDefinition,
 	grep: grepToolDefinition,
 	find: findToolDefinition,
@@ -174,6 +192,7 @@ export type ToolName = keyof typeof allTools;
 export interface ToolsOptions {
 	read?: ReadToolOptions;
 	bash?: BashToolOptions;
+	task?: TaskToolOptions;
 }
 
 export function createCodingToolDefinitions(cwd: string, options?: ToolsOptions): ToolDef[] {
@@ -184,6 +203,7 @@ export function createCodingToolDefinitions(cwd: string, options?: ToolsOptions)
 		createWriteToolDefinition(cwd),
 		createWebFetchToolDefinition(),
 		createWebSearchToolDefinition(),
+		createTaskToolDefinition(cwd, options?.task),
 	];
 }
 
@@ -202,6 +222,7 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 		bash: createBashToolDefinition(cwd, options?.bash),
 		edit: createEditToolDefinition(cwd),
 		write: createWriteToolDefinition(cwd),
+		task: createTaskToolDefinition(cwd, options?.task),
 		todowrite: createTodoWriteToolDefinition(),
 		grep: createGrepToolDefinition(cwd),
 		find: createFindToolDefinition(cwd),
@@ -219,6 +240,7 @@ export function createCodingTools(cwd: string, options?: ToolsOptions): Tool[] {
 		createWriteTool(cwd),
 		createWebFetchTool(),
 		createWebSearchTool(),
+		createTaskTool(cwd, options?.task),
 	];
 }
 
@@ -232,6 +254,7 @@ export function createAllTools(cwd: string, options?: ToolsOptions): Record<Tool
 		bash: createBashTool(cwd, options?.bash),
 		edit: createEditTool(cwd),
 		write: createWriteTool(cwd),
+		task: createTaskTool(cwd, options?.task),
 		todowrite: createTodoWriteTool(),
 		grep: createGrepTool(cwd),
 		find: createFindTool(cwd),

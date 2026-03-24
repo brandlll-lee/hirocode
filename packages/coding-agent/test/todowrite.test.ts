@@ -31,7 +31,15 @@ describe("todowrite tool", () => {
 
 	test("is available but not enabled by default", () => {
 		expect(allTools.todowrite.name).toBe("todowrite");
-		expect(codingTools.map((tool) => tool.name)).toEqual(["read", "bash", "edit", "write", "webfetch", "websearch"]);
+		expect(codingTools.map((tool) => tool.name)).toEqual([
+			"read",
+			"bash",
+			"edit",
+			"write",
+			"webfetch",
+			"websearch",
+			"task",
+		]);
 	});
 
 	test("stores validated todos in details", async () => {

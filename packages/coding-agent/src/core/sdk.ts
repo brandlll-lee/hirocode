@@ -26,6 +26,7 @@ import {
 	createLsTool,
 	createReadOnlyTools,
 	createReadTool,
+	createTaskTool,
 	createWebFetchTool,
 	createWebSearchTool,
 	createWriteTool,
@@ -37,6 +38,7 @@ import {
 	readTool,
 	type Tool,
 	type ToolName,
+	taskTool,
 	webFetchTool,
 	webSearchTool,
 	withFileMutationQueue,
@@ -61,7 +63,7 @@ export interface CreateAgentSessionOptions {
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 
-	/** Built-in tools to use. Default: codingTools [read, bash, edit, write, webfetch, websearch] */
+	/** Built-in tools to use. Default: codingTools [read, bash, edit, write, webfetch, websearch, task] */
 	tools?: Tool[];
 	/** Custom tools to register (in addition to built-in tools). */
 	customTools?: ToolDefinition[];
@@ -108,6 +110,7 @@ export {
 	bashTool,
 	editTool,
 	writeTool,
+	taskTool,
 	grepTool,
 	findTool,
 	lsTool,
@@ -127,6 +130,7 @@ export {
 	createGrepTool,
 	createFindTool,
 	createLsTool,
+	createTaskTool,
 	createWebFetchTool,
 	createWebSearchTool,
 };
@@ -248,7 +252,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = "off";
 	}
 
-	const defaultActiveToolNames: ToolName[] = ["read", "bash", "edit", "write", "webfetch", "websearch"];
+	const defaultActiveToolNames: ToolName[] = ["read", "bash", "edit", "write", "webfetch", "websearch", "task"];
 	const initialActiveToolNames: ToolName[] = options.tools
 		? options.tools.map((t) => t.name).filter((n): n is ToolName => n in allTools)
 		: defaultActiveToolNames;
