@@ -130,19 +130,21 @@ function getGitBashCandidates(env: NodeJS.ProcessEnv, platform: NodeJS.Platform)
 	const candidates: ShellCandidate[] = [];
 	const programFiles = env.ProgramFiles;
 	if (programFiles) {
-		candidates.push(createCandidate(path.join(programFiles, "Git", "bin", "bash.exe"), "bash", platform, "git-bash"));
+		candidates.push(
+			createCandidate(path.win32.join(programFiles, "Git", "bin", "bash.exe"), "bash", platform, "git-bash"),
+		);
 	}
 	const programFilesX86 = env["ProgramFiles(x86)"];
 	if (programFilesX86) {
 		candidates.push(
-			createCandidate(path.join(programFilesX86, "Git", "bin", "bash.exe"), "bash", platform, "git-bash-x86"),
+			createCandidate(path.win32.join(programFilesX86, "Git", "bin", "bash.exe"), "bash", platform, "git-bash-x86"),
 		);
 	}
 
 	const git = resolveExecutableSync("git", env);
 	if (git) {
 		candidates.push(
-			createCandidate(path.join(git, "..", "..", "bin", "bash.exe"), "bash", platform, "git-bash-from-git"),
+			createCandidate(path.win32.join(git, "..", "..", "bin", "bash.exe"), "bash", platform, "git-bash-from-git"),
 		);
 	}
 
