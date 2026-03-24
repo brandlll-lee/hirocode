@@ -70,7 +70,11 @@ function getAliases(): Record<string, string> {
 		if (fs.existsSync(workspacePath)) {
 			return workspacePath;
 		}
-		return fileURLToPath(import.meta.resolve(specifier));
+		const importMetaResolve = (import.meta as ImportMeta & { resolve?: (specifier: string) => string }).resolve;
+		if (typeof importMetaResolve === "function") {
+			return fileURLToPath(importMetaResolve(specifier));
+		}
+		return require.resolve(specifier);
 	};
 
 	_aliases = {

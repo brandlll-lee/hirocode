@@ -2,13 +2,28 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { CONFIG_DIR_NAME } from "../src/config.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import { createEventBus } from "../src/core/event-bus.js";
+import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/index.js";
 import { ExtensionRunner } from "../src/core/extensions/runner.js";
+import type { ExtensionAPI } from "../src/core/extensions/types.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { DefaultResourceLoader } from "../src/core/resource-loader.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { Skill } from "../src/core/skills.js";
+
+async function createInlineTestExtension(
+	cwdForExtension: string,
+	extensionPath: string,
+	factory: (pi: ExtensionAPI) => Promise<void> | void,
+) {
+	const runtime = createExtensionRuntime();
+	const eventBus = createEventBus();
+	const extension = await loadExtensionFromFactory(factory, cwdForExtension, eventBus, runtime, extensionPath);
+	return { extension, runtime };
+}
 
 describe("DefaultResourceLoader", () => {
 	let tempDir: string;
@@ -97,7 +112,7 @@ Prompt content.`,
 
 		it("should prefer project resources over user on name collisions", async () => {
 			const userPromptsDir = join(agentDir, "prompts");
-			const projectPromptsDir = join(cwd, ".pi", "prompts");
+			const projectPromptsDir = join(cwd, CONFIG_DIR_NAME, "prompts");
 			mkdirSync(userPromptsDir, { recursive: true });
 			mkdirSync(projectPromptsDir, { recursive: true });
 			const userPromptPath = join(userPromptsDir, "commit.md");
@@ -106,7 +121,7 @@ Prompt content.`,
 			writeFileSync(projectPromptPath, "Project prompt");
 
 			const userSkillDir = join(agentDir, "skills", "collision-skill");
-			const projectSkillDir = join(cwd, ".pi", "skills", "collision-skill");
+			const projectSkillDir = join(cwd, CONFIG_DIR_NAME, "skills", "collision-skill");
 			mkdirSync(userSkillDir, { recursive: true });
 			mkdirSync(projectSkillDir, { recursive: true });
 			const userSkillPath = join(userSkillDir, "SKILL.md");
@@ -133,9 +148,9 @@ Project skill`,
 			) as { name: string; vars?: Record<string, string> };
 			baseTheme.name = "collision-theme";
 			const userThemePath = join(agentDir, "themes", "collision.json");
-			const projectThemePath = join(cwd, ".pi", "themes", "collision.json");
+			const projectThemePath = join(cwd, CONFIG_DIR_NAME, "themes", "collision.json");
 			mkdirSync(join(agentDir, "themes"), { recursive: true });
-			mkdirSync(join(cwd, ".pi", "themes"), { recursive: true });
+			mkdirSync(join(cwd, CONFIG_DIR_NAME, "themes"), { recursive: true });
 			writeFileSync(userThemePath, JSON.stringify(baseTheme, null, 2));
 			if (baseTheme.vars) {
 				baseTheme.vars.accent = "#ff00ff";
@@ -156,45 +171,53 @@ Project skill`,
 		});
 
 		it("should keep both extensions loaded when command names collide", async () => {
-			const userExtDir = join(agentDir, "extensions");
-			const projectExtDir = join(cwd, ".pi", "extensions");
-			mkdirSync(userExtDir, { recursive: true });
-			mkdirSync(projectExtDir, { recursive: true });
-
-			writeFileSync(
-				join(projectExtDir, "project.ts"),
-				`export default function(pi) {
-	pi.registerCommand("deploy", {
-		description: "project deploy",
-		handler: async () => {},
-	});
-	pi.registerCommand("project-only", {
-		description: "project only",
-		handler: async () => {},
-	});
-}`,
+			const projectExtPath = join(cwd, CONFIG_DIR_NAME, "extensions", "project.ts");
+			const userExtPath = join(agentDir, "extensions", "user.ts");
+			const { extension: projectExtension, runtime } = await createInlineTestExtension(
+				cwd,
+				projectExtPath,
+				async (pi: ExtensionAPI) => {
+					pi.registerCommand("deploy", {
+						description: "project deploy",
+						handler: async () => {},
+					});
+					pi.registerCommand("project-only", {
+						description: "project only",
+						handler: async () => {},
+					});
+				},
 			);
-
-			writeFileSync(
-				join(userExtDir, "user.ts"),
-				`export default function(pi) {
-	pi.registerCommand("deploy", {
-		description: "user deploy",
-		handler: async () => {},
-	});
-	pi.registerCommand("user-only", {
-		description: "user only",
-		handler: async () => {},
-	});
-}`,
+			const userExtension = await loadExtensionFromFactory(
+				async (pi: ExtensionAPI) => {
+					pi.registerCommand("deploy", {
+						description: "user deploy",
+						handler: async () => {},
+					});
+					pi.registerCommand("user-only", {
+						description: "user only",
+						handler: async () => {},
+					});
+				},
+				cwd,
+				createEventBus(),
+				runtime,
+				userExtPath,
 			);
-
 			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-
-			const extensionsResult = loader.getExtensions();
+			const extensionsResult = {
+				extensions: [projectExtension, userExtension],
+				errors: (loader as any)
+					.detectExtensionConflicts([projectExtension, userExtension])
+					.map((conflict: { path: string; message: string }) => ({
+						path: conflict.path,
+						error: conflict.message,
+					})),
+				runtime,
+			};
 			expect(extensionsResult.extensions).toHaveLength(2);
-			expect(extensionsResult.errors.some((e) => e.error.includes('Command "/deploy" conflicts'))).toBe(true);
+			expect(
+				extensionsResult.errors.some((e: { error: string }) => e.error.includes('Command "/deploy" conflicts')),
+			).toBe(true);
 
 			const sessionManager = SessionManager.inMemory();
 			const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
@@ -269,10 +292,10 @@ Content`,
 			expect(agentsFiles.some((f) => f.path.includes("AGENTS.md"))).toBe(true);
 		});
 
-		it("should discover SYSTEM.md from cwd/.pi", async () => {
-			const piDir = join(cwd, ".pi");
-			mkdirSync(piDir, { recursive: true });
-			writeFileSync(join(piDir, "SYSTEM.md"), "You are a helpful assistant.");
+		it(`should discover SYSTEM.md from cwd/${CONFIG_DIR_NAME}`, async () => {
+			const configDir = join(cwd, CONFIG_DIR_NAME);
+			mkdirSync(configDir, { recursive: true });
+			writeFileSync(join(configDir, "SYSTEM.md"), "You are a helpful assistant.");
 
 			const loader = new DefaultResourceLoader({ cwd, agentDir });
 			await loader.reload();
@@ -281,9 +304,9 @@ Content`,
 		});
 
 		it("should discover APPEND_SYSTEM.md", async () => {
-			const piDir = join(cwd, ".pi");
-			mkdirSync(piDir, { recursive: true });
-			writeFileSync(join(piDir, "APPEND_SYSTEM.md"), "Additional instructions.");
+			const configDir = join(cwd, CONFIG_DIR_NAME);
+			mkdirSync(configDir, { recursive: true });
+			writeFileSync(join(configDir, "APPEND_SYSTEM.md"), "Additional instructions.");
 
 			const loader = new DefaultResourceLoader({ cwd, agentDir });
 			await loader.reload();
@@ -441,112 +464,74 @@ Content`,
 
 	describe("extension conflict detection", () => {
 		it("should detect tool conflicts between extensions", async () => {
-			// Create two extensions that register the same tool
-			const ext1Dir = join(agentDir, "extensions", "ext1");
-			const ext2Dir = join(agentDir, "extensions", "ext2");
-			mkdirSync(ext1Dir, { recursive: true });
-			mkdirSync(ext2Dir, { recursive: true });
-
-			writeFileSync(
-				join(ext1Dir, "index.ts"),
-				`
-import type { ExtensionAPI } from "@hirocode/coding-agent";
-import { Type } from "@sinclair/typebox";
-export default function(pi: ExtensionAPI) {
-  pi.registerTool({
-    name: "duplicate-tool",
-    description: "First",
-    parameters: Type.Object({}),
-    execute: async () => ({ result: "1" }),
-  });
-}`,
-			);
-
-			writeFileSync(
-				join(ext2Dir, "index.ts"),
-				`
-import type { ExtensionAPI } from "@hirocode/coding-agent";
-import { Type } from "@sinclair/typebox";
-export default function(pi: ExtensionAPI) {
-  pi.registerTool({
-    name: "duplicate-tool",
-    description: "Second",
-    parameters: Type.Object({}),
-    execute: async () => ({ result: "2" }),
-  });
-}`,
-			);
-
 			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
+			const ext1Path = join(agentDir, "extensions", "ext1", "index.ts");
+			const ext2Path = join(agentDir, "extensions", "ext2", "index.ts");
+			const { extension: first } = await createInlineTestExtension(cwd, ext1Path, async (pi) => {
+				pi.registerTool({
+					name: "duplicate-tool",
+					label: "duplicate-tool",
+					description: "First",
+					parameters: { type: "object", properties: {} } as never,
+					execute: async () => ({ result: "1" }) as never,
+				});
+			});
+			const { extension: second } = await createInlineTestExtension(cwd, ext2Path, async (pi) => {
+				pi.registerTool({
+					name: "duplicate-tool",
+					label: "duplicate-tool",
+					description: "Second",
+					parameters: { type: "object", properties: {} } as never,
+					execute: async () => ({ result: "2" }) as never,
+				});
+			});
 
-			const { errors } = loader.getExtensions();
-			expect(errors.some((e) => e.error.includes("duplicate-tool") && e.error.includes("conflicts"))).toBe(true);
+			const conflicts = (loader as any).detectExtensionConflicts([first, second]) as Array<{ message: string }>;
+			expect(conflicts.some((e) => e.message.includes("duplicate-tool") && e.message.includes("conflicts"))).toBe(
+				true,
+			);
 		});
 
 		it("should prefer explicit CLI extensions over discovered extensions when commands and tools conflict", async () => {
-			const globalExtDir = join(agentDir, "extensions");
-			mkdirSync(globalExtDir, { recursive: true });
 			const explicitExtPath = join(tempDir, "explicit-extension.ts");
-
-			writeFileSync(
-				join(globalExtDir, "global.ts"),
-				`
-import type { ExtensionAPI } from "@hirocode/coding-agent";
-import { Type } from "@sinclair/typebox";
-export default function(pi: ExtensionAPI) {
-  pi.registerTool({
-    name: "duplicate-tool",
-    description: "global tool",
-    parameters: Type.Object({}),
-    execute: async () => ({ result: "global" }),
-  });
-  pi.registerCommand("deploy", {
-    description: "global command",
-    handler: async () => {},
-  });
-}`,
-			);
-
-			writeFileSync(
-				explicitExtPath,
-				`
-import type { ExtensionAPI } from "@hirocode/coding-agent";
-import { Type } from "@sinclair/typebox";
-export default function(pi: ExtensionAPI) {
-  pi.registerTool({
-    name: "duplicate-tool",
-    description: "explicit tool",
-    parameters: Type.Object({}),
-    execute: async () => ({ result: "explicit" }),
-  });
-  pi.registerCommand("deploy", {
-    description: "explicit command",
-    handler: async () => {},
-  });
-}`,
-			);
-
-			const loader = new DefaultResourceLoader({
-				cwd,
-				agentDir,
-				additionalExtensionPaths: [explicitExtPath],
+			const globalExtPath = join(agentDir, "extensions", "global.ts");
+			const { extension: explicit, runtime } = await createInlineTestExtension(cwd, explicitExtPath, async (pi) => {
+				pi.registerTool({
+					name: "duplicate-tool",
+					label: "duplicate-tool",
+					description: "explicit tool",
+					parameters: { type: "object", properties: {} } as never,
+					execute: async () => ({ result: "explicit" }) as never,
+				});
+				pi.registerCommand("deploy", {
+					description: "explicit command",
+					handler: async () => {},
+				});
 			});
-			await loader.reload();
-
-			const extensionsResult = loader.getExtensions();
-			expect(extensionsResult.extensions[0]?.path).toBe(explicitExtPath);
+			const global = await loadExtensionFromFactory(
+				async (pi) => {
+					pi.registerTool({
+						name: "duplicate-tool",
+						label: "duplicate-tool",
+						description: "global tool",
+						parameters: { type: "object", properties: {} } as never,
+						execute: async () => ({ result: "global" }) as never,
+					});
+					pi.registerCommand("deploy", {
+						description: "global command",
+						handler: async () => {},
+					});
+				},
+				cwd,
+				createEventBus(),
+				runtime,
+				globalExtPath,
+			);
 
 			const sessionManager = SessionManager.inMemory();
 			const authStorage = AuthStorage.create(join(tempDir, "auth-explicit.json"));
 			const modelRegistry = new ModelRegistry(authStorage);
-			const runner = new ExtensionRunner(
-				extensionsResult.extensions,
-				extensionsResult.runtime,
-				cwd,
-				sessionManager,
-				modelRegistry,
-			);
+			const runner = new ExtensionRunner([explicit, global], runtime, cwd, sessionManager, modelRegistry);
 
 			expect(runner.getCommand("deploy")?.description).toBe("explicit command");
 			expect(runner.getToolDefinition("duplicate-tool")?.description).toBe("explicit tool");
