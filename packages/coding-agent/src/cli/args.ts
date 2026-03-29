@@ -194,7 +194,7 @@ export function parseArgs(args: string[], extensionFlags?: Map<string, { type: "
 }
 
 export function printHelp(): void {
-	console.log(`${chalk.bold(APP_NAME)} - AI coding assistant with read, bash, edit, write, and web tools
+	console.log(`${chalk.bold(APP_NAME)} - AI coding assistant with file, shell, web, and delegated task tools
 
 ${chalk.bold("Usage:")}
   ${APP_NAME} [options] [@files...] [messages...]
@@ -206,6 +206,8 @@ ${chalk.bold("Commands:")}
   ${APP_NAME} update [source]           Update installed extensions (skips pinned sources)
   ${APP_NAME} list                      List installed extensions from settings
   ${APP_NAME} config                    Open TUI to enable/disable package resources
+  ${APP_NAME} mission "<goal>"         Start Mission planning mode in interactive TUI
+  ${APP_NAME} missions                  Open saved Missions in interactive TUI
   ${APP_NAME} <command> --help          Show help for install/remove/uninstall/update/list
 
 ${chalk.bold("Options:")}
@@ -224,9 +226,9 @@ ${chalk.bold("Options:")}
   --no-session                   Don't save session (ephemeral)
   --models <patterns>            Comma-separated model patterns for Ctrl+P cycling
                                  Supports globs (anthropic/*, *sonnet*) and fuzzy matching
-  --no-tools                     Disable all built-in tools
-	  --tools <tools>                Comma-separated list of tools to enable (default: read,bash,edit,write,webfetch,websearch)
-	                                 Available: read, bash, edit, write, todowrite, grep, find, ls, webfetch, websearch
+	  --no-tools                     Disable all built-in tools
+	  --tools <tools>                Comma-separated list of tools to enable (default: read,bash,edit,write,webfetch,websearch,task)
+	                                 Available: read, bash, edit, write, task, todowrite, grep, find, ls, webfetch, websearch
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh
   --extension, -e <path>         Load an extension file (can be used multiple times)
   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)
@@ -244,7 +246,7 @@ ${chalk.bold("Options:")}
   --help, -h                     Show this help
   --version, -v                  Show version number
 
-Extensions can register additional flags (e.g., --plan from plan-mode extension).
+	Extensions can register additional flags (e.g., --plan from a plan-mode extension).
 
 ${chalk.bold("Examples:")}
   # Interactive mode
@@ -252,6 +254,9 @@ ${chalk.bold("Examples:")}
 
   # Interactive mode with initial prompt
   ${APP_NAME} "List all .ts files in src/"
+
+  # Start Mission planning for a large task
+  ${APP_NAME} mission "Build a full-stack todo app with auth"
 
   # Include files in initial message
   ${APP_NAME} @prompt.md @image.png "What color is the sky?"
@@ -329,16 +334,17 @@ ${chalk.bold("Environment Variables:")}
 
 Legacy aliases still work: ${ENV_AGENT_DIR_LEGACY}, ${ENV_PACKAGE_DIR_LEGACY}, ${ENV_OFFLINE_LEGACY}, ${ENV_SHARE_VIEWER_URL_LEGACY}
 
-${chalk.bold("Available Tools (default: read, bash, edit, write, webfetch, websearch):")}
+${chalk.bold("Available Tools (default: read, bash, edit, write, webfetch, websearch, task):")}
   read   - Read file contents
   bash   - Execute bash commands
   edit   - Edit files with find/replace
   write  - Write files (creates/overwrites)
-	  todowrite - Create or replace a structured todo list (off by default)
-	  grep   - Search file contents (read-only, off by default)
-	  find   - Find files by glob pattern (read-only, off by default)
-	  ls     - List directory contents (read-only, off by default)
-	  webfetch   - Fetch URL contents (off by default)
-	  websearch  - Search the web for current information (off by default)
+  task   - Delegate focused work to a built-in or configured subagent session
+  todowrite - Create or replace a structured todo list (off by default)
+  grep   - Search file contents (read-only, off by default)
+  find   - Find files by glob pattern (read-only, off by default)
+  ls     - List directory contents (read-only, off by default)
+  webfetch   - Fetch URL contents
+  websearch  - Search the web for current information
 `);
 }

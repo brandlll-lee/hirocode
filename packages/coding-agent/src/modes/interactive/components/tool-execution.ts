@@ -4,10 +4,13 @@ import { allToolDefinitions } from "../../../core/tools/index.js";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.js";
 import { convertToPng } from "../../../utils/image-convert.js";
 import { theme } from "../theme/theme.js";
+import { keyHint } from "./keybinding-hints.js";
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
 }
+
+const FALLBACK_PREVIEW_LINES = 20;
 
 export class ToolExecutionComponent extends Container {
 	private contentBox: Box;
@@ -134,7 +137,7 @@ export class ToolExecutionComponent extends Container {
 		if (!output) {
 			return undefined;
 		}
-		return new Text(theme.fg("toolOutput", output), 0, 0);
+		return new Text(this.formatFallbackText(output), 0, 0);
 	}
 
 	updateArgs(args: any): void {
@@ -338,7 +341,34 @@ export class ToolExecutionComponent extends Container {
 		if (output) {
 			text += `\n${output}`;
 		}
-		return text;
+		return this.formatFallbackText(text, { preserveExistingStyles: true });
+	}
+
+	private formatFallbackText(text: string, options?: { preserveExistingStyles?: boolean }): string {
+		const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n+$/, "");
+		const lines = normalized.split("\n");
+		const totalLines = lines.length;
+		const formatLine = (line: string) => (options?.preserveExistingStyles ? line : theme.fg("toolOutput", line));
+		if (totalLines === 0) {
+			return formatLine(normalized);
+		}
+
+		if (this.expanded || totalLines <= FALLBACK_PREVIEW_LINES) {
+			const body = lines.map(formatLine).join("\n");
+			if (totalLines <= FALLBACK_PREVIEW_LINES) {
+				return body;
+			}
+			return `${body}\n${theme.fg("muted", "(")}${keyHint("app.tools.expand", "to collapse")}${theme.fg("muted", ")")}`;
+		}
+
+		const previewLines = lines.slice(0, FALLBACK_PREVIEW_LINES).map(formatLine).join("\n");
+		const remaining = totalLines - FALLBACK_PREVIEW_LINES;
+		return (
+			`${previewLines}\n` +
+			theme.fg("muted", `... (${remaining} more lines, `) +
+			keyHint("app.tools.expand", "to expand") +
+			theme.fg("muted", ")")
+		);
 	}
 
 	private getSurfaceStyle(): "boxed" | "plain" {

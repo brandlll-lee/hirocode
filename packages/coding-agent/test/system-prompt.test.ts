@@ -25,22 +25,25 @@ describe("buildSystemPrompt", () => {
 	});
 
 	describe("default tools", () => {
-		test("includes all default tools when snippets are provided", () => {
+		test("includes all documented default tools when snippets are provided", () => {
 			const prompt = buildSystemPrompt({
 				toolSnippets: {
 					read: "Read file contents",
 					bash: "Execute bash commands",
 					edit: "Make surgical edits",
 					write: "Create or overwrite files",
+					task: "Delegate work to a subagent",
 				},
 				contextFiles: [],
 				skills: [],
 			});
 
+			expect(prompt).toContain("operating inside hirocode");
 			expect(prompt).toContain("- read:");
 			expect(prompt).toContain("- bash:");
 			expect(prompt).toContain("- edit:");
 			expect(prompt).toContain("- write:");
+			expect(prompt).toContain("- task: Delegate work to a subagent");
 		});
 	});
 

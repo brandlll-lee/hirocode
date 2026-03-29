@@ -24,9 +24,9 @@ OSS weekend runs Friday, March 20, 2026 through Monday, March 23, 2026. New issu
   <a href="https://exe.dev"><img src="docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
 </p>
 
-Hirocode is a minimal terminal coding harness. Adapt hirocode to your workflows, not the other way around, without having to fork and modify the core internals. Extend it with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), and [Themes](#themes). Put your extensions, skills, prompt templates, and themes in [Hirocode Packages](#hirocode-packages) and share them with others via npm or git.
+Hirocode is a terminal coding agent harness with an extensible core. Adapt hirocode to your workflows, not the other way around, without forking the internals. Extend it with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), and [Themes](#themes). Put your extensions, skills, prompt templates, and themes in [Hirocode Packages](#hirocode-packages) and share them with others via npm or git.
 
-Hirocode ships with powerful defaults but skips features like sub agents and plan mode. Instead, you can ask hirocode to build what you want or install a third-party package that matches your workflow.
+Today the core already includes interactive and headless modes, JSON/RPC integration, session trees with compaction, built-in web/file/shell tools, delegated task sessions via the `task` tool, built-in subagent profiles, and a first-class specification workflow via `/spec`. More advanced workflows like mission orchestration, MCP management, and GitHub automation can already be layered on via extensions and packages while the first-class product surface catches up.
 
 Hirocode runs in four modes: interactive, print or JSON, RPC for process integration, and an SDK for embedding in your own apps. See [openclaw/openclaw](https://github.com/openclaw/openclaw) for a real-world SDK integration.
 
@@ -78,7 +78,40 @@ hirocode
 /login  # Then select provider
 ```
 
-Then just talk to hirocode. By default, hirocode gives the model six tools: `read`, `write`, `edit`, `bash`, `webfetch`, and `websearch`. Additional built-in tools like `todowrite`, `grep`, `find`, and `ls` can be enabled explicitly. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [hirocode packages](#hirocode-packages).
+Then just talk to hirocode. By default, hirocode gives the model seven built-in tools: `read`, `bash`, `edit`, `write`, `webfetch`, `websearch`, and `task`. Additional built-in tools like `todowrite`, `grep`, `find`, and `ls` can be enabled explicitly. The legacy `pi` command remains available as a compatibility alias, but `hirocode` is the primary CLI name.
+
+## Capability Matrix
+
+Hirocode's current product surface is intentionally uneven: some capabilities are stable built-ins today, some already exist in core but were under-documented, some are extension-promotable now, and some are still missing as first-class workflows.
+
+### Stable built-in
+
+- Interactive terminal UI, print mode, JSON mode, RPC mode, and SDK embedding
+- Session persistence, `/resume`, `/tree`, `/fork`, auto-compaction, HTML export, sharing
+- Provider/model selection, OAuth and API-key auth, scoped models, thinking levels
+- Built-in tools: `read`, `bash`, `edit`, `write`, `webfetch`, `websearch`, `task`
+- First-class specification workflow via `/spec`, including plan extraction, approval, and saved spec artifacts
+- Built-in subagent profiles: `general`, `explore`, `planner`, `reviewer`
+- Resource discovery for AGENTS.md / CLAUDE.md, skills, prompt templates, themes, and extensions
+
+### Built-in but previously under-documented
+
+- The default active built-in tool set already includes `task`
+- Delegated child sessions are built into core and can be inspected with `/subagents`
+- The `pi` command and `PI_*` environment variables remain supported as compatibility aliases
+
+### Extension-promotable today
+
+- Permission gates, protected paths, destructive action confirmation, and sandbox adapters
+- MCP-style tool integration, custom providers, SSH delegation, custom tool renderers, and custom UI
+- Todo workflows, session labeling/bookmarking, custom compaction, and runtime reload flows
+
+### Missing as first-class core workflows
+
+- Built-in autonomy ladder and approval center
+- First-class Mission orchestration and Mission Control
+- First-class MCP manager and registry UX
+- First-class review workflow and GitHub automation surface
 
 **Platform notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
 
@@ -160,6 +193,9 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/new` | Start a new session |
 | `/name <name>` | Set session display name |
 | `/session` | Show session info (path, tokens, cost) |
+| `/agents` | Browse available built-in, user, and project subagents |
+| `/spec [request]` | Enter specification mode, review plans, or continue an active spec workflow |
+| `/subagents` | Browse delegated child sessions and jump between them |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/fork` | Create a new session from the current branch |
 | `/compact [prompt]` | Manually compact context, optional custom instructions |
@@ -421,19 +457,15 @@ See [docs/rpc.md](docs/rpc.md) for the protocol.
 
 ## Philosophy
 
-Hirocode is aggressively extensible so it doesn't have to dictate your workflow. Features that other tools bake in can be built with [extensions](#extensions), [skills](#skills), or installed from third-party [hirocode packages](#hirocode-packages). This keeps the core minimal while letting you shape hirocode to fit how you work.
+Hirocode keeps the core small, scriptable, and extensible, but the line between "core" and "workflow" needs to stay honest.
 
-**No MCP.** Build CLI tools with READMEs (see [Skills](#skills)), or build an extension that adds MCP support. [Why?](https://mariozechner.at/posts/2025-11-02-what-if-you-dont-need-mcp/)
+**Core first.** Hirocode already ships with sessions, branching, compaction, built-in shell/file/web tools, delegated task sessions, built-in subagent profiles, and first-class specification mode. Those are not extension-only features and should be described as such.
 
-**No sub-agents.** There's many ways to do this. Spawn hirocode instances via tmux, or build your own with [extensions](#extensions), or install a package that does it your way.
+**Extensions are for product shape, not for hiding reality.** Mission workflows, permission gates, sandbox adapters, MCP integrations, custom providers, and higher-level orchestration can already be built on top of the current runtime. Extension examples remain the proving ground for features that may later move into core.
 
-**No permission popups.** Run in a container, or build your own confirmation flow with [extensions](#extensions) inline with your environment and security requirements.
+**Compatibility stays, branding moves forward.** The `pi` CLI name, package manifest conventions, and `PI_*` environment variable aliases remain supported for compatibility, but `hirocode` is the primary product name and the preferred name in new surface area.
 
-**No plan mode.** Write plans to files, or build it with [extensions](#extensions), or install a package.
-
-**No default built-in to-dos.** An optional `todowrite` tool is available when you explicitly enable it, or you can still use a TODO.md file or build your own with [extensions](#extensions).
-
-**No background bash.** Use tmux. Full observability, direct interaction.
+**Missing first-class workflows stay explicit.** Hirocode still does not ship first-class mission orchestration, a complete autonomy ladder UX, or a built-in MCP manager. Those remain roadmap items, not hidden features.
 
 Read the [blog post](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/) for the full rationale.
 
@@ -498,10 +530,10 @@ cat README.md | hirocode -p "Summarize this text"
 
 | Option | Description |
 |--------|-------------|
-| `--tools <list>` | Enable specific built-in tools (default: `read,bash,edit,write,webfetch,websearch`) |
+| `--tools <list>` | Enable specific built-in tools (default: `read,bash,edit,write,webfetch,websearch,task`) |
 | `--no-tools` | Disable all built-in tools (extension tools still work) |
 
-Available built-in tools: `read`, `bash`, `edit`, `write`, `todowrite`, `grep`, `find`, `ls`, `webfetch`, `websearch`
+Available built-in tools: `read`, `bash`, `edit`, `write`, `task`, `todowrite`, `grep`, `find`, `ls`, `webfetch`, `websearch`
 
 ### Resource Options
 

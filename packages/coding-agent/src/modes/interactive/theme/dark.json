@@ -10,7 +10,7 @@
 		"gray": "#808080",
 		"dimGray": "#666666",
 		"darkGray": "#505050",
-		"accent": "#8abeb7",
+		"accent": "#d7875f",
 		"selectedBg": "#3a3a4a",
 		"userMsgBg": "#343541",
 		"toolPendingBg": "#282832",
@@ -21,7 +21,7 @@
 	"colors": {
 		"accent": "accent",
 		"border": "blue",
-		"borderAccent": "cyan",
+		"borderAccent": "accent",
 		"borderMuted": "darkGray",
 		"success": "green",
 		"error": "red",
@@ -43,8 +43,8 @@
 		"toolTitle": "",
 		"toolOutput": "gray",
 
-		"mdHeading": "#f0c674",
-		"mdLink": "#81a2be",
+		"mdHeading": "accent",
+		"mdLink": "accent",
 		"mdLinkUrl": "dimGray",
 		"mdCode": "accent",
 		"mdCodeBlock": "green",

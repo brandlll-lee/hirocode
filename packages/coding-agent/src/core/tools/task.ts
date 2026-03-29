@@ -3,7 +3,9 @@ import { Type } from "@sinclair/typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.js";
 import type { ThemeColor } from "../../modes/interactive/theme/theme.js";
+import { getSessionSafetyServices } from "../approval/runtime-services.js";
 import type { ToolDefinition } from "../extensions/types.js";
+import { readLatestSpecState } from "../spec/state.js";
 import { discoverAgents, formatAgentList } from "../subagents/agent-registry.js";
 import { formatModelReference } from "../subagents/invocation.js";
 import { evaluateTaskPermissions } from "../subagents/permissions.js";
@@ -331,7 +333,9 @@ export function createTaskToolDefinition(
 				throw new Error("Task tool requires an active session context.");
 			}
 
+			const approval = getSessionSafetyServices(ctx.sessionManager)?.approval;
 			const parentTaskMetadata = readCurrentTaskSessionMetadata(ctx.sessionManager);
+			const specState = readLatestSpecState(ctx.sessionManager);
 
 			const agentScope = params.agentScope ?? "user";
 			const discovery = discoverAgents(ctx.cwd, agentScope);
@@ -373,6 +377,30 @@ export function createTaskToolDefinition(
 				};
 			}
 
+			if (specState?.phase === "planning" && !agent.readOnly) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Canceled: subagent ${agent.name} is not marked read-only and cannot run during specification mode.`,
+						},
+					],
+					details: { agentScope, projectAgentsDir: discovery.projectAgentsDir },
+				};
+			}
+
+			if (agent.mode === "primary") {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Canceled: agent ${agent.name} is marked as primary-only and cannot run as a delegated subagent.`,
+						},
+					],
+					details: { agentScope, projectAgentsDir: discovery.projectAgentsDir },
+				};
+			}
+
 			if (parentTaskMetadata) {
 				if (
 					!parentTaskMetadata.allowSubagents &&
@@ -389,33 +417,77 @@ export function createTaskToolDefinition(
 						throw new Error(`Subagent ${agent.name} is not allowed by the current task permission policy.`);
 					}
 					if (permission.action === "ask") {
-						if (!ctx.hasUI) {
+						if (approval) {
+							const result = await approval.request({
+								permission: "task",
+								pattern: agent.name,
+								normalizedPattern: agent.name,
+								level: "high",
+								summary: `Approve delegated subagent ${agent.name}`,
+								justification: `Current delegated session requested subagent ${agent.name}. Rule: ${permission.rule?.pattern ?? "default ask"}`,
+								tags: ["delegation", "nested-task"],
+								displayTarget: agent.name,
+							});
+							if (!result.allowed) {
+								return {
+									content: [{ type: "text", text: `Canceled: subagent ${agent.name} was not approved.` }],
+									details: { agentScope, projectAgentsDir: discovery.projectAgentsDir },
+								};
+							}
+						} else if (!ctx.hasUI) {
 							throw new Error(`Subagent ${agent.name} requires interactive approval before it can run.`);
-						}
-						const approved = await ctx.ui.confirm(
-							"Allow delegated subagent?",
-							`Current delegated session requested subagent ${agent.name}. Rule: ${permission.rule?.pattern ?? "default ask"}`,
-						);
-						if (!approved) {
-							return {
-								content: [{ type: "text", text: `Canceled: subagent ${agent.name} was not approved.` }],
-								details: { agentScope, projectAgentsDir: discovery.projectAgentsDir },
-							};
+						} else {
+							const approved = await ctx.ui.confirm(
+								"Allow delegated subagent?",
+								`Current delegated session requested subagent ${agent.name}. Rule: ${permission.rule?.pattern ?? "default ask"}`,
+							);
+							if (!approved) {
+								return {
+									content: [{ type: "text", text: `Canceled: subagent ${agent.name} was not approved.` }],
+									details: { agentScope, projectAgentsDir: discovery.projectAgentsDir },
+								};
+							}
 						}
 					}
 				}
 			}
 
-			if (agent.source === "project" && (params.confirmProjectAgents ?? true) && ctx.hasUI && !locatedTask) {
-				const ok = await ctx.ui.confirm(
-					"Run project-local agent?",
-					`Agent: ${agent.name}\nSource: ${discovery.projectAgentsDir ?? "(unknown)"}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
-				);
-				if (!ok) {
-					return {
-						content: [{ type: "text", text: "Canceled: project-local agent not approved." }],
-						details: { agentScope, projectAgentsDir: discovery.projectAgentsDir },
-					};
+			if (!locatedTask) {
+				const pattern = agent.source === "project" ? `project:${agent.name}` : agent.name;
+				const justification =
+					agent.source === "project"
+						? `Project agents are repo-controlled. Agent ${agent.name} comes from ${discovery.projectAgentsDir ?? "(unknown)"}. Only continue for trusted repositories.`
+						: `Delegated subagent ${agent.name} runs in an isolated child session and can execute tools independently.`;
+				if (approval) {
+					const result = await approval.request({
+						permission: "task",
+						pattern,
+						normalizedPattern: pattern,
+						level: "high",
+						summary: `Approve delegated subagent ${agent.name}`,
+						justification,
+						tags: agent.source === "project" ? ["delegation", "project-agent"] : ["delegation"],
+						displayTarget: pattern,
+					});
+					if (!result.allowed) {
+						return {
+							content: [{ type: "text", text: `Canceled: subagent ${agent.name} was not approved.` }],
+							details: { agentScope, projectAgentsDir: discovery.projectAgentsDir },
+						};
+					}
+				} else if (agent.source === "project" && (params.confirmProjectAgents ?? true) && ctx.hasUI) {
+					const ok = await ctx.ui.confirm(
+						"Run project-local agent?",
+						`Agent: ${agent.name}\nSource: ${discovery.projectAgentsDir ?? "(unknown)"}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
+					);
+					if (!ok) {
+						return {
+							content: [{ type: "text", text: "Canceled: project-local agent not approved." }],
+							details: { agentScope, projectAgentsDir: discovery.projectAgentsDir },
+						};
+					}
+				} else if (!ctx.hasUI) {
+					throw new Error(`Subagent ${agent.name} requires approval before it can run in the current runtime.`);
 				}
 			}
 

@@ -18,11 +18,11 @@ import { basename, dirname, join, resolve } from "node:path";
 import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@hirocode/agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@hirocode/ai";
 import { isContextOverflow, modelsAreEqual, resetApiProviders, supportsXhigh } from "@hirocode/ai";
-import { getDocsPath } from "../config.js";
+import { getAgentDir, getDocsPath } from "../config.js";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
-import { type BashResult, executeBash as executeBashCommand, executeBashWithOperations } from "./bash-executor.js";
+import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 import {
 	type CompactionResult,
 	calculateContextTokens,
@@ -62,14 +62,17 @@ import {
 	type TurnStartEvent,
 	wrapRegisteredTools,
 } from "./extensions/index.js";
+import { convertMcpToolToDefinition, McpManager, watchMcpConfig } from "./mcp/index.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
+import { authorizeDirectBash, authorizeToolCall, getExecutionOperations } from "./policy/authorize.js";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.js";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { BUILTIN_SLASH_COMMANDS, type SlashCommandInfo, type SlashCommandLocation } from "./slash-commands.js";
+import { getSpecToolBlockReason } from "./spec/tool-policy.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import type { BashOperations } from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
@@ -266,6 +269,10 @@ export class AgentSession {
 	// Model registry for API key resolution
 	private _modelRegistry: ModelRegistry;
 
+	// MCP server manager
+	private _mcpManager: McpManager;
+	private _mcpConfigWatcher?: { close: () => void };
+
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
 	private _toolDefinitions: Map<string, ToolDefinition> = new Map();
@@ -356,6 +363,7 @@ export class AgentSession {
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._baseToolsOverride = config.baseToolsOverride;
+		this._mcpManager = new McpManager(config.cwd);
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -365,6 +373,26 @@ export class AgentSession {
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
+		});
+
+		// Initialize MCP servers in the background (non-blocking)
+		this._mcpManager
+			.initialize(true)
+			.then(() => {
+				if (this._mcpManager.getTools().size > 0) {
+					this._refreshToolRegistry();
+				}
+			})
+			.catch(() => {});
+
+		// Watch mcp.json for external changes → auto-reload
+		this._mcpConfigWatcher = watchMcpConfig(config.cwd, getAgentDir(), () => {
+			this._mcpManager
+				.reload(true)
+				.then(() => {
+					this._refreshToolRegistry();
+				})
+				.catch(() => {});
 		});
 	}
 
@@ -384,19 +412,56 @@ export class AgentSession {
 	private _installAgentToolHooks(): void {
 		this.agent.setBeforeToolCall(async ({ toolCall, args }) => {
 			const runner = this._extensionRunner;
-			if (!runner?.hasHandlers("tool_call")) {
-				return undefined;
-			}
-
 			await this._agentEventQueue;
 
+			if (runner?.hasHandlers("tool_call")) {
+				try {
+					const hookResult = await runner.emitToolCall({
+						type: "tool_call",
+						toolName: toolCall.name,
+						toolCallId: toolCall.id,
+						input: args as Record<string, unknown>,
+					});
+					if (hookResult?.block) {
+						return hookResult;
+					}
+				} catch (err) {
+					if (err instanceof Error) {
+						throw err;
+					}
+					throw new Error(`Extension failed, blocking execution: ${String(err)}`);
+				}
+			}
+
 			try {
-				return await runner.emitToolCall({
-					type: "tool_call",
+				const specBlockReason = await getSpecToolBlockReason({
+					sessionManager: this.sessionManager,
 					toolName: toolCall.name,
-					toolCallId: toolCall.id,
-					input: args as Record<string, unknown>,
+					args: args as Record<string, unknown>,
+					cwd: this._cwd,
 				});
+				if (specBlockReason) {
+					return {
+						block: true,
+						reason: specBlockReason,
+					};
+				}
+
+				const approval = await authorizeToolCall({
+					toolName: toolCall.name,
+					args: args as Record<string, unknown>,
+					cwd: this._cwd,
+					sessionManager: this.sessionManager,
+					settingsManager: this.settingsManager,
+					approvalMode: this._extensionUIContext ? "interactive" : "disabled",
+				});
+				if (approval && !approval.allowed) {
+					return {
+						block: true,
+						reason: approval.reason ?? `Blocked ${toolCall.name} by approval policy.`,
+					};
+				}
+				return undefined;
 			} catch (err) {
 				if (err instanceof Error) {
 					throw err;
@@ -728,6 +793,13 @@ export class AgentSession {
 	dispose(): void {
 		this._disconnectFromAgent();
 		this._eventListeners = [];
+		this._mcpConfigWatcher?.close();
+		this._mcpManager.shutdown().catch(() => {});
+	}
+
+	/** MCP server manager */
+	get mcpManager(): McpManager {
+		return this._mcpManager;
 	}
 
 	// =========================================================================
@@ -989,10 +1061,27 @@ export class AgentSession {
 			return;
 		}
 
-		// Flush any pending bash messages before the new prompt
+		const messages: AgentMessage[] = [];
+		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+		if (currentImages) {
+			userContent.push(...currentImages);
+		}
+		messages.push({
+			role: "user",
+			content: userContent,
+			timestamp: Date.now(),
+		});
+
+		await this._startTurn(messages, expandedText, currentImages);
+	}
+
+	private async _startTurn(
+		messages: AgentMessage[],
+		promptForExtensions: string,
+		images?: ImageContent[],
+	): Promise<void> {
 		this._flushPendingBashMessages();
 
-		// Validate model
 		if (!this.model) {
 			throw new Error(
 				"No model selected.\n\n" +
@@ -1001,7 +1090,6 @@ export class AgentSession {
 			);
 		}
 
-		// Validate API key
 		const apiKey = await this._modelRegistry.getApiKey(this.model);
 		if (!apiKey) {
 			const isOAuth = this._modelRegistry.isUsingOAuth(this.model);
@@ -1018,40 +1106,21 @@ export class AgentSession {
 			);
 		}
 
-		// Check if we need to compact before sending (catches aborted responses)
 		const lastAssistant = this._findLastAssistantMessage();
 		if (lastAssistant) {
 			await this._checkCompaction(lastAssistant, false);
 		}
 
-		// Build messages array (custom message if any, then user message)
-		const messages: AgentMessage[] = [];
-
-		// Add user message
-		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
-		if (currentImages) {
-			userContent.push(...currentImages);
-		}
-		messages.push({
-			role: "user",
-			content: userContent,
-			timestamp: Date.now(),
-		});
-
-		// Inject any pending "nextTurn" messages as context alongside the user message
-		for (const msg of this._pendingNextTurnMessages) {
-			messages.push(msg);
-		}
+		const queuedNextTurnMessages = this._pendingNextTurnMessages;
 		this._pendingNextTurnMessages = [];
+		messages.push(...queuedNextTurnMessages);
 
-		// Emit before_agent_start extension event
 		if (this._extensionRunner) {
 			const result = await this._extensionRunner.emitBeforeAgentStart(
-				expandedText,
-				currentImages,
+				promptForExtensions,
+				images,
 				this._baseSystemPrompt,
 			);
-			// Add all custom messages from extensions
 			if (result?.messages) {
 				for (const msg of result.messages) {
 					messages.push({
@@ -1064,11 +1133,9 @@ export class AgentSession {
 					});
 				}
 			}
-			// Apply extension-modified system prompt, or reset to base
 			if (result?.systemPrompt) {
 				this.agent.setSystemPrompt(result.systemPrompt);
 			} else {
-				// Ensure we're using the base prompt (in case previous turn had modifications)
 				this.agent.setSystemPrompt(this._baseSystemPrompt);
 			}
 		}
@@ -1109,16 +1176,33 @@ export class AgentSession {
 	}
 
 	/**
-	 * Expand skill commands (/skill:name args) to their full content.
+	 * Expand skill commands to their full content.
+	 * Supports two invocation formats:
+	 *   - /skill:name [args]  (explicit, backward-compatible)
+	 *   - /skill-name [args]  (direct, Droid-compatible; only for user-invocable skills)
 	 * Returns the expanded text, or the original text if not a skill command or skill not found.
 	 * Emits errors via extension runner if file read fails.
 	 */
 	private _expandSkillCommand(text: string): string {
-		if (!text.startsWith("/skill:")) return text;
+		if (!text.startsWith("/")) return text;
 
 		const spaceIndex = text.indexOf(" ");
-		const skillName = spaceIndex === -1 ? text.slice(7) : text.slice(7, spaceIndex);
+		const command = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
+
+		let skillName: string | null = null;
+		if (command.startsWith("skill:")) {
+			// /skill:name format (backward-compatible)
+			skillName = command.slice(6);
+		} else {
+			// /skill-name direct format (Droid-compatible); only matches user-invocable skills
+			const directSkill = this.resourceLoader
+				.getSkills()
+				.skills.find((s) => s.name === command && s.userInvocable !== false);
+			if (directSkill) skillName = command;
+		}
+
+		if (!skillName) return text;
 
 		const skill = this.resourceLoader.getSkills().skills.find((s) => s.name === skillName);
 		if (!skill) return text; // Unknown skill, pass through
@@ -1262,7 +1346,7 @@ export class AgentSession {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
-			await this.agent.prompt(appMessage);
+			await this._startTurn([appMessage], `[custom:${message.customType}]`);
 		} else {
 			this.agent.appendMessage(appMessage);
 			this.sessionManager.appendCustomMessageEntry(
@@ -2310,6 +2394,16 @@ export class AgentSession {
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
 			toolRegistry.set(tool.name, tool);
 		}
+
+		// Inject MCP server tools
+		if (this._mcpManager?.initialized) {
+			for (const [toolKey, { mcpTool, client, serverName }] of this._mcpManager.getTools()) {
+				const mcpDef = convertMcpToolToDefinition(serverName, mcpTool, client, toolKey);
+				definitionRegistry.set(toolKey, mcpDef);
+				toolRegistry.set(toolKey, wrapToolDefinition(mcpDef));
+			}
+		}
+
 		this._toolRegistry = toolRegistry;
 
 		const nextActiveToolNames = options?.activeToolNames
@@ -2571,18 +2665,44 @@ export class AgentSession {
 		options?: { excludeFromContext?: boolean; operations?: BashOperations },
 	): Promise<BashResult> {
 		this._bashAbortController = new AbortController();
+		const specBlockReason = await getSpecToolBlockReason({
+			sessionManager: this.sessionManager,
+			toolName: "bash",
+			args: { command },
+			cwd: this._cwd,
+		});
+		if (specBlockReason) {
+			throw new Error(specBlockReason);
+		}
+		const approval = await authorizeDirectBash({
+			command,
+			cwd: this._cwd,
+			sessionManager: this.sessionManager,
+			settingsManager: this.settingsManager,
+			approvalMode: this._extensionUIContext ? "interactive" : "disabled",
+		});
+		if (approval && !approval.allowed) {
+			throw new Error(approval.reason ?? "Bash command blocked by approval policy.");
+		}
 
 		// Apply command prefix if configured (e.g., "shopt -s expand_aliases" for alias support)
 		const prefix = this.settingsManager.getShellCommandPrefix();
 		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
 
 		try {
+			const operations =
+				options?.operations ??
+				getExecutionOperations(
+					this.sessionManager,
+					this.settingsManager,
+					this._extensionUIContext ? "interactive" : "disabled",
+				);
 			const result = options?.operations
 				? await executeBashWithOperations(resolvedCommand, process.cwd(), options.operations, {
 						onChunk,
 						signal: this._bashAbortController.signal,
 					})
-				: await executeBashCommand(resolvedCommand, {
+				: await executeBashWithOperations(resolvedCommand, process.cwd(), operations, {
 						onChunk,
 						signal: this._bashAbortController.signal,
 					});
@@ -3249,6 +3369,20 @@ export class AgentSession {
 		}
 
 		return text.trim() || undefined;
+	}
+
+	/**
+	 * Remove transient custom messages from the in-memory agent context.
+	 * Session history on disk is left untouched.
+	 */
+	removeCustomMessages(customTypes: string[]): void {
+		const blocked = new Set(customTypes);
+		const filtered = this.agent.state.messages.filter((message) => {
+			return message.role !== "custom" || !blocked.has(message.customType);
+		});
+		if (filtered.length !== this.agent.state.messages.length) {
+			this.agent.replaceMessages(filtered);
+		}
 	}
 
 	// =========================================================================

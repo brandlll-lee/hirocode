@@ -42,6 +42,11 @@ export class CustomMessageComponent extends Container {
 		}
 	}
 
+	updateMessage(message: CustomMessage<unknown>): void {
+		this.message = message;
+		this.rebuild();
+	}
+
 	override invalidate(): void {
 		super.invalidate();
 		this.rebuild();

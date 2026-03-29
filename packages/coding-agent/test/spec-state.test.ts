@@ -1,0 +1,144 @@
+import { describe, expect, it } from "vitest";
+import { SessionManager } from "../src/core/session-manager.js";
+import {
+	createInactiveSpecState,
+	createSpecState,
+	readLatestSpecState,
+	writeSpecState,
+} from "../src/core/spec/state.js";
+
+describe("spec state mask", () => {
+	it("enables the spec mask for non-inactive states by default", () => {
+		const planning = createSpecState({ phase: "planning" });
+		expect(planning.maskEnabled).toBe(true);
+		expect(planning.planningStartedAt).toEqual(expect.any(String));
+		expect(planning.planningTurnCount).toBe(0);
+		expect(planning.planningEvidence).toEqual({
+			hasGrounding: false,
+			hasAsk: false,
+			hasAgentsGuidance: false,
+			hasDependencyReview: false,
+			askCount: 0,
+			hasWebSearch: false,
+			hasWebFetch: false,
+			hasVersionResearch: false,
+		});
+		expect(createSpecState({ phase: "approved" }).maskEnabled).toBe(true);
+		expect(createSpecState({ phase: "executing" }).maskEnabled).toBe(true);
+		expect(createSpecState({ phase: "inactive" }).maskEnabled).toBe(false);
+	});
+
+	it("clears the mask when creating an inactive state", () => {
+		const state = createInactiveSpecState(createSpecState({ phase: "planning", maskEnabled: true }));
+		expect(state.phase).toBe("inactive");
+		expect(state.maskEnabled).toBe(false);
+		expect(state.planningStartedAt).toBeUndefined();
+		expect(state.planningTurnCount).toBeUndefined();
+		expect(state.planningEvidence).toBeUndefined();
+	});
+
+	it("normalizes persisted states that predate maskEnabled", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendCustomEntry("hirocode.spec.state", {
+			id: "spec-1",
+			phase: "approved",
+			updatedAt: new Date().toISOString(),
+			title: "Spec",
+			plan: {
+				title: "Spec",
+				summary: [],
+				goals: [],
+				constraints: [],
+				acceptanceCriteria: ["done"],
+				technicalDetails: [],
+				fileChanges: [],
+				userJourney: [],
+				errorScenarios: [],
+				securityCompliance: [],
+				scalePerformance: [],
+				implementationPlan: ["do thing"],
+				verificationPlan: ["verify"],
+				assumptions: [],
+				markdown: "# Spec",
+			},
+		});
+
+		expect(readLatestSpecState(sessionManager)?.maskEnabled).toBe(true);
+		expect(readLatestSpecState(sessionManager)?.plan?.sections).toEqual([]);
+	});
+
+	it("reconstructs plan sections for persisted legacy specs", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendCustomEntry("hirocode.spec.state", {
+			id: "spec-legacy",
+			phase: "approved",
+			updatedAt: new Date().toISOString(),
+			title: "Legacy Spec",
+			plan: {
+				title: "Legacy Spec",
+				summary: [],
+				goals: [],
+				constraints: [],
+				acceptanceCriteria: [],
+				technicalDetails: [],
+				fileChanges: ["packages/coding-agent/src/core/spec/plan.ts"],
+				userJourney: [],
+				errorScenarios: [],
+				securityCompliance: [],
+				scalePerformance: [],
+				implementationPlan: ["Refactor parser"],
+				verificationPlan: ["Run spec tests"],
+				assumptions: [],
+				markdown:
+					"# Legacy Spec\n## 修改方案\n- Refactor parser\n## 涉及文件\n- packages/coding-agent/src/core/spec/plan.ts\n## 验证方案\n- Run spec tests",
+			},
+		});
+
+		expect(readLatestSpecState(sessionManager)?.plan?.sections.map((section) => section.title)).toEqual([
+			"修改方案",
+			"涉及文件",
+			"验证方案",
+		]);
+	});
+
+	it("persists maskEnabled explicitly", () => {
+		const sessionManager = SessionManager.inMemory();
+		const persisted = writeSpecState(sessionManager, {
+			id: "spec-2",
+			phase: "planning",
+			maskEnabled: false,
+			plan: undefined,
+		});
+
+		expect(persisted.maskEnabled).toBe(false);
+		expect(readLatestSpecState(sessionManager)?.maskEnabled).toBe(false);
+	});
+
+	it("normalizes legacy planning states with missing planning evidence fields", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendCustomEntry("hirocode.spec.state", {
+			id: "spec-planning-legacy",
+			phase: "planning",
+			updatedAt: new Date().toISOString(),
+			maskEnabled: true,
+			request: "Plan a feature",
+		});
+
+		expect(readLatestSpecState(sessionManager)).toMatchObject({
+			phase: "planning",
+			maskEnabled: true,
+			planningStartedAt: expect.any(String),
+			planningTurnCount: 0,
+			planningEvidence: {
+				hasGrounding: false,
+				hasAsk: false,
+				hasAgentsGuidance: false,
+				hasDependencyReview: false,
+				askCount: 0,
+				hasWebSearch: false,
+				hasWebFetch: false,
+				hasVersionResearch: false,
+			},
+		});
+	});
+});

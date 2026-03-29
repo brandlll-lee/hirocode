@@ -28,6 +28,11 @@ describe("subagent agent discovery", () => {
 			`---
 name: code-reviewer
 description: Reviews diffs for bugs
+mode: subagent
+readOnly: true
+hidden: true
+specRole: reviewer
+reasoningEffort: high
 allowSubagents: true
 taskPermissions:
   reviewer: deny
@@ -48,12 +53,17 @@ Review the provided code and report risks.
 		expect(parsed).toEqual({
 			name: "code-reviewer",
 			description: "Reviews diffs for bugs",
+			mode: "subagent",
+			readOnly: true,
+			hidden: true,
+			specRole: "reviewer",
+			reasoningEffort: "high",
 			allowSubagents: true,
 			taskPermissions: [
 				{ pattern: "reviewer", action: "deny" },
 				{ pattern: "*", action: "allow" },
 			],
-			tools: ["Read", "Grep"],
+			tools: ["read", "grep"],
 			model: "claude-sonnet-4-5",
 			systemPrompt: "Review the provided code and report risks.",
 			source: "user",
@@ -150,7 +160,7 @@ Project only prompt.
 		expect(byName.get("explore")?.source).toBe("built-in");
 		expect(byName.get("shared")?.source).toBe("project");
 		expect(byName.get("shared")?.systemPrompt).toBe("Project prompt.");
-		expect(byName.get("shared")?.tools).toEqual(["Read", "Glob"]);
+		expect(byName.get("shared")?.tools).toEqual(["read", "find"]);
 		expect(byName.get("user-only")?.source).toBe("user");
 		expect(byName.get("project-only")?.source).toBe("project");
 	});
@@ -196,11 +206,27 @@ Legacy prompt.
 		expect(byName.get("general")).toMatchObject({
 			name: "general",
 			source: "built-in",
+			mode: "both",
 		});
 		expect(byName.get("explore")).toMatchObject({
 			name: "explore",
 			source: "built-in",
 			tools: ["read", "grep", "find", "ls", "bash"],
+			readOnly: true,
+			specRole: "explore",
+		});
+		expect(byName.get("planner")).toMatchObject({
+			name: "planner",
+			source: "built-in",
+			readOnly: true,
+			specRole: "planner",
+			allowSubagents: true,
+		});
+		expect(byName.get("reviewer")).toMatchObject({
+			name: "reviewer",
+			source: "built-in",
+			readOnly: true,
+			specRole: "reviewer",
 		});
 	});
 });

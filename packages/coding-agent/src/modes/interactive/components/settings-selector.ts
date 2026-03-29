@@ -11,6 +11,12 @@ import {
 	Spacer,
 	Text,
 } from "@hirocode/tui";
+import {
+	INTERACTIVE_AUTONOMY_PRESET_VALUES,
+	type InteractiveAutonomyPreset,
+	type StandardInteractiveAutonomyPreset,
+} from "../../../core/policy/interactive-autonomy.js";
+import type { ApprovalPolicy, SandboxAdapter } from "../../../core/policy/types.js";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 
@@ -30,6 +36,10 @@ const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 
 export interface SettingsConfig {
 	autoCompact: boolean;
+	interactiveAutonomyPreset: InteractiveAutonomyPreset;
+	approvalPolicy: ApprovalPolicy;
+	sandboxAdapter: SandboxAdapter;
+	sandboxEnabled: boolean;
 	showImages: boolean;
 	autoResizeImages: boolean;
 	blockImages: boolean;
@@ -54,6 +64,10 @@ export interface SettingsConfig {
 
 export interface SettingsCallbacks {
 	onAutoCompactChange: (enabled: boolean) => void;
+	onInteractiveAutonomyPresetChange: (preset: StandardInteractiveAutonomyPreset) => void;
+	onApprovalPolicyChange: (policy: ApprovalPolicy) => void;
+	onSandboxEnabledChange: (enabled: boolean) => void;
+	onSandboxAdapterChange: (adapter: SandboxAdapter) => void;
 	onShowImagesChange: (enabled: boolean) => void;
 	onAutoResizeImagesChange: (enabled: boolean) => void;
 	onBlockImagesChange: (blocked: boolean) => void;
@@ -161,6 +175,35 @@ export class SettingsSelectorComponent extends Container {
 				description: "Automatically compact context when it gets too large",
 				currentValue: config.autoCompact ? "true" : "false",
 				values: ["true", "false"],
+			},
+			{
+				id: "auto-run",
+				label: "Auto-run",
+				description: "Primary interactive autonomy preset for manual, low, medium, or high execution",
+				currentValue: config.interactiveAutonomyPreset,
+				values: [...INTERACTIVE_AUTONOMY_PRESET_VALUES],
+			},
+			{
+				id: "sandbox-enabled",
+				label: "Sandbox enabled",
+				description: "Enable the execution adapter selected below for bash commands",
+				currentValue: config.sandboxEnabled ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "sandbox-adapter",
+				label: "Sandbox adapter",
+				description: "Execution backend for bash commands when sandboxing is enabled",
+				currentValue: config.sandboxAdapter,
+				values: ["local", "sandbox"],
+			},
+			{
+				id: "approval-policy",
+				label: "Approval fallback (advanced)",
+				description:
+					"Advanced override for approval handling, mainly useful for headless runtimes or custom policies",
+				currentValue: config.approvalPolicy,
+				values: ["always-ask", "policy-driven", "headless-reject"],
 			},
 			{
 				id: "steering-mode",
@@ -275,8 +318,8 @@ export class SettingsSelectorComponent extends Container {
 
 		// Only show image toggle if terminal supports it
 		if (supportsImages) {
-			// Insert after autocompact
-			items.splice(1, 0, {
+			const autoRunIndex = items.findIndex((item) => item.id === "auto-run");
+			items.splice(autoRunIndex + 1, 0, {
 				id: "show-images",
 				label: "Show images",
 				description: "Render images inline in terminal",
@@ -286,7 +329,9 @@ export class SettingsSelectorComponent extends Container {
 		}
 
 		// Image auto-resize toggle (always available, affects both attached and read images)
-		items.splice(supportsImages ? 2 : 1, 0, {
+		const autoRunIndex = items.findIndex((item) => item.id === "auto-run");
+		const showImagesIndex = items.findIndex((item) => item.id === "show-images");
+		items.splice(showImagesIndex >= 0 ? showImagesIndex + 1 : autoRunIndex + 1, 0, {
 			id: "auto-resize-images",
 			label: "Auto-resize images",
 			description: "Resize large images to 2000x2000 max for better model compatibility",
@@ -365,6 +410,18 @@ export class SettingsSelectorComponent extends Container {
 				switch (id) {
 					case "autocompact":
 						callbacks.onAutoCompactChange(newValue === "true");
+						break;
+					case "auto-run":
+						callbacks.onInteractiveAutonomyPresetChange(newValue as StandardInteractiveAutonomyPreset);
+						break;
+					case "approval-policy":
+						callbacks.onApprovalPolicyChange(newValue as ApprovalPolicy);
+						break;
+					case "sandbox-enabled":
+						callbacks.onSandboxEnabledChange(newValue === "true");
+						break;
+					case "sandbox-adapter":
+						callbacks.onSandboxAdapterChange(newValue as SandboxAdapter);
 						break;
 					case "show-images":
 						callbacks.onShowImagesChange(newValue === "true");

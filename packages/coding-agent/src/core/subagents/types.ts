@@ -1,8 +1,11 @@
+import type { ThinkingLevel } from "@hirocode/agent-core";
 import type { Message } from "@hirocode/ai";
 
 export type AgentScope = "user" | "project" | "both";
 export type AgentSource = "built-in" | "user" | "project";
 export type TaskPermissionAction = "allow" | "deny" | "ask";
+export type AgentMode = "primary" | "subagent" | "both";
+export type AgentSpecRole = "general" | "explore" | "planner" | "reviewer" | "validator";
 
 export interface TaskPermissionRule {
 	pattern: string;
@@ -14,7 +17,12 @@ export interface AgentConfig {
 	description: string;
 	tools?: string[];
 	model?: string;
+	reasoningEffort?: ThinkingLevel;
 	allowSubagents?: boolean;
+	mode?: AgentMode;
+	hidden?: boolean;
+	readOnly?: boolean;
+	specRole?: AgentSpecRole;
 	taskPermissions?: TaskPermissionRule[];
 	systemPrompt: string;
 	source: AgentSource;
@@ -59,6 +67,25 @@ export interface TaskSessionMetadata {
 	tools?: string[];
 	systemPrompt?: string;
 }
+
+export interface DelegatedTaskApprovalRequest {
+	requestId: string;
+	summary: string;
+	kind: string;
+	taskId: string;
+	sessionId: string;
+	sessionFile: string;
+	agent: string;
+}
+
+export interface DelegatedTaskApprovalDecision {
+	approved: boolean;
+	reason?: string;
+}
+
+export type DelegatedTaskApprovalHandler = (
+	request: DelegatedTaskApprovalRequest,
+) => Promise<DelegatedTaskApprovalDecision>;
 
 export type TaskSessionStatus = "running" | "completed" | "failed" | "error" | "aborted";
 

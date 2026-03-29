@@ -226,6 +226,42 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("done");
 	});
 
+	test("collapses long fallback tool output until expanded", () => {
+		const component = new ToolExecutionComponent(
+			"mcp_tool",
+			"tool-long",
+			{ query: "snapshot" },
+			{},
+			createBaseToolDefinition("mcp_tool"),
+			createFakeTui(),
+		);
+		component.updateResult(
+			{
+				content: [
+					{
+						type: "text",
+						text: Array.from({ length: 25 }, (_, index) => `line ${index + 1}`).join("\n"),
+					},
+				],
+				details: {},
+				isError: false,
+			},
+			false,
+		);
+
+		let rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("line 1");
+		expect(rendered).toContain("line 20");
+		expect(rendered).not.toContain("line 21");
+		expect(rendered).toContain("5 more lines");
+		expect(rendered).toContain("to expand");
+
+		component.setExpanded(true);
+		rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("line 25");
+		expect(rendered).toContain("to collapse");
+	});
+
 	test("supports plain surface style without tool background colors", () => {
 		const toolDefinition: ToolDefinition = {
 			...createBaseToolDefinition(),

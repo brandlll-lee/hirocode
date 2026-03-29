@@ -99,13 +99,15 @@ describe("subagent extension registration", () => {
 	});
 
 	it("inherits the parent model when the agent does not specify one", () => {
-		expect(resolveEffectiveSubagentModel(undefined, { provider: "openai", id: "gpt-5.4" })).toEqual({
+		expect(resolveEffectiveSubagentModel(undefined, undefined, { provider: "openai", id: "gpt-5.4" })).toEqual({
 			provider: "openai",
 			modelId: "gpt-5.4",
 			modelArg: "openai/gpt-5.4",
 		});
 
-		expect(resolveEffectiveSubagentModel("claude-haiku-4-5", { provider: "openai", id: "gpt-5.4" })).toEqual({
+		expect(
+			resolveEffectiveSubagentModel("claude-haiku-4-5", undefined, { provider: "openai", id: "gpt-5.4" }),
+		).toEqual({
 			modelId: "claude-haiku-4-5",
 			modelArg: "claude-haiku-4-5",
 		});

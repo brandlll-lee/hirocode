@@ -4,7 +4,7 @@
  */
 
 import { Container, getKeybindings, Spacer, Text, type TUI } from "@hirocode/tui";
-import { theme } from "../theme/theme.js";
+import { type ThemeColor, theme } from "../theme/theme.js";
 import { CountdownTimer } from "./countdown-timer.js";
 import { DynamicBorder } from "./dynamic-border.js";
 import { keyHint, rawKeyHint } from "./keybinding-hints.js";
@@ -12,6 +12,7 @@ import { keyHint, rawKeyHint } from "./keybinding-hints.js";
 export interface ExtensionSelectorOptions {
 	tui?: TUI;
 	timeout?: number;
+	highlightColor?: ThemeColor;
 }
 
 export class ExtensionSelectorComponent extends Container {
@@ -23,6 +24,7 @@ export class ExtensionSelectorComponent extends Container {
 	private titleText: Text;
 	private baseTitle: string;
 	private countdown: CountdownTimer | undefined;
+	private highlightColor: ThemeColor;
 
 	constructor(
 		title: string,
@@ -37,11 +39,12 @@ export class ExtensionSelectorComponent extends Container {
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
 		this.baseTitle = title;
+		this.highlightColor = opts?.highlightColor ?? "accent";
 
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 
-		this.titleText = new Text(theme.fg("accent", title), 1, 0);
+		this.titleText = new Text(theme.fg(this.highlightColor, title), 1, 0);
 		this.addChild(this.titleText);
 		this.addChild(new Spacer(1));
 
@@ -49,7 +52,7 @@ export class ExtensionSelectorComponent extends Container {
 			this.countdown = new CountdownTimer(
 				opts.timeout,
 				opts.tui,
-				(s) => this.titleText.setText(theme.fg("accent", `${this.baseTitle} (${s}s)`)),
+				(s) => this.titleText.setText(theme.fg(this.highlightColor, `${this.baseTitle} (${s}s)`)),
 				() => this.onCancelCallback(),
 			);
 		}
@@ -79,7 +82,7 @@ export class ExtensionSelectorComponent extends Container {
 		for (let i = 0; i < this.options.length; i++) {
 			const isSelected = i === this.selectedIndex;
 			const text = isSelected
-				? theme.fg("accent", "→ ") + theme.fg("accent", this.options[i])
+				? theme.fg(this.highlightColor, "→ ") + theme.fg(this.highlightColor, this.options[i])
 				: `  ${theme.fg("text", this.options[i])}`;
 			this.listContainer.addChild(new Text(text, 1, 0));
 		}

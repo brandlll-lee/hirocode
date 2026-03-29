@@ -200,6 +200,41 @@ describe("skills", () => {
 			expect(skills).toHaveLength(1);
 			expect(skills[0].disableModelInvocation).toBe(false);
 		});
+
+		it("should parse user-invocable: false frontmatter field", () => {
+			const { skills, diagnostics } = loadSkillsFromDir({
+				dir: join(fixturesDir, "user-invocable-false"),
+				source: "test",
+			});
+
+			expect(skills).toHaveLength(1);
+			expect(skills[0].name).toBe("user-invocable-false");
+			expect(skills[0].userInvocable).toBe(false);
+			expect(diagnostics.some((d: ResourceDiagnostic) => d.message.includes("unknown frontmatter field"))).toBe(
+				false,
+			);
+		});
+
+		it("should default userInvocable to true when not specified", () => {
+			const { skills } = loadSkillsFromDir({
+				dir: join(fixturesDir, "valid-skill"),
+				source: "test",
+			});
+
+			expect(skills).toHaveLength(1);
+			expect(skills[0].userInvocable).toBe(true);
+		});
+
+		it("should set userInvocable to true when user-invocable: true is specified", () => {
+			const { skills } = loadSkillsFromDir({
+				dir: join(fixturesDir, "disable-model-invocation"),
+				source: "test",
+			});
+
+			expect(skills).toHaveLength(1);
+			// disable-model-invocation fixture doesn't set user-invocable, so defaults to true
+			expect(skills[0].userInvocable).toBe(true);
+		});
 	});
 
 	describe("formatSkillsForPrompt", () => {
@@ -217,6 +252,7 @@ describe("skills", () => {
 					baseDir: "/path/to/skill",
 					source: "test",
 					disableModelInvocation: false,
+					userInvocable: true,
 				},
 			];
 
@@ -239,6 +275,7 @@ describe("skills", () => {
 					baseDir: "/path/to/skill",
 					source: "test",
 					disableModelInvocation: false,
+					userInvocable: true,
 				},
 			];
 
@@ -259,6 +296,7 @@ describe("skills", () => {
 					baseDir: "/path/to/skill",
 					source: "test",
 					disableModelInvocation: false,
+					userInvocable: true,
 				},
 			];
 
@@ -278,6 +316,7 @@ describe("skills", () => {
 					baseDir: "/path/one",
 					source: "test",
 					disableModelInvocation: false,
+					userInvocable: true,
 				},
 				{
 					name: "skill-two",
@@ -286,6 +325,7 @@ describe("skills", () => {
 					baseDir: "/path/two",
 					source: "test",
 					disableModelInvocation: false,
+					userInvocable: true,
 				},
 			];
 
@@ -305,6 +345,7 @@ describe("skills", () => {
 					baseDir: "/path/visible",
 					source: "test",
 					disableModelInvocation: false,
+					userInvocable: true,
 				},
 				{
 					name: "hidden-skill",
@@ -313,6 +354,7 @@ describe("skills", () => {
 					baseDir: "/path/hidden",
 					source: "test",
 					disableModelInvocation: true,
+					userInvocable: true,
 				},
 			];
 
@@ -332,6 +374,7 @@ describe("skills", () => {
 					baseDir: "/path/hidden",
 					source: "test",
 					disableModelInvocation: true,
+					userInvocable: true,
 				},
 			];
 

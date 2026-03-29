@@ -116,6 +116,8 @@ describe("todowrite tool", () => {
 		printHelp();
 
 		const output = log.mock.calls.map(([value]) => String(value)).join("\n");
+		expect(output).toContain("default: read,bash,edit,write,webfetch,websearch,task");
+		expect(output).toContain("task   - Delegate focused work to a built-in or configured subagent session");
 		expect(output).toContain("todowrite");
 		expect(output).toContain("Create or replace a structured todo list");
 	});

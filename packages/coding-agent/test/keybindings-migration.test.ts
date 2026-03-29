@@ -71,4 +71,12 @@ describe("keybindings migration", () => {
 		expect(effective["tui.select.confirm"]).toBe("enter");
 		expect(effective["app.interrupt"]).toBe("ctrl+x");
 	});
+
+	it("exposes default bindings for spec toggle and autonomy cycle", () => {
+		const keybindings = new KeybindingsManager();
+		const effective = keybindings.getEffectiveConfig();
+
+		expect(effective["app.spec.toggle"]).toBe("ctrl+b");
+		expect(effective["app.autonomy.cycle"]).toBe("ctrl+x");
+	});
 });

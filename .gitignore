@@ -36,3 +36,5 @@ pi-*.html
 out.html
 packages/coding-agent/binaries/
 todo.md
+.hirocode/docs/
+LOVE_HIROCODE.md

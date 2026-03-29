@@ -67,6 +67,7 @@ export interface SkillFrontmatter {
 	name?: string;
 	description?: string;
 	"disable-model-invocation"?: boolean;
+	"user-invocable"?: boolean;
 	[key: string]: unknown;
 }
 
@@ -77,6 +78,8 @@ export interface Skill {
 	baseDir: string;
 	source: string;
 	disableModelInvocation: boolean;
+	/** When false, the skill is hidden from the user-facing slash command menu but can still be auto-invoked by the model. Default: true */
+	userInvocable: boolean;
 }
 
 export interface LoadSkillsResult {
@@ -293,6 +296,7 @@ function loadSkillFromFile(
 				baseDir: skillDir,
 				source,
 				disableModelInvocation: frontmatter["disable-model-invocation"] === true,
+				userInvocable: frontmatter["user-invocable"] !== false,
 			},
 			diagnostics,
 		};

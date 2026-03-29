@@ -38,17 +38,18 @@
 		"@typescript/native-preview": "7.0.0-dev.20260120.1",
 		"concurrently": "^9.2.1",
 		"husky": "^9.1.7",
+		"shx": "^0.4.0",
 		"tsx": "^4.20.3",
-		"typescript": "^5.9.2",
-		"shx": "^0.4.0"
+		"typescript": "^5.9.2"
 	},
 	"engines": {
 		"node": ">=20.0.0"
 	},
 	"version": "0.0.3",
 	"dependencies": {
-		"@mariozechner/jiti": "^2.6.5",
 		"@hirocode/coding-agent": "^0.61.1",
+		"@mariozechner/jiti": "^2.6.5",
+		"@modelcontextprotocol/sdk": "^1.28.0",
 		"get-east-asian-width": "^1.4.0"
 	},
 	"overrides": {

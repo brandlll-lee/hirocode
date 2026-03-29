@@ -82,6 +82,7 @@ This is a test skill.
 			baseDir: "/fake/path",
 			source: "custom" as const,
 			disableModelInvocation: false,
+			userInvocable: true,
 		};
 
 		const resourceLoader: ResourceLoader = {

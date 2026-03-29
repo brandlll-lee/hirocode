@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@hirocode/agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, OAuthProviderId } from "@hirocode/ai";
+import type { AssistantMessage, ImageContent, Message, Model, OAuthProviderId, TextContent } from "@hirocode/ai";
 import type {
 	AutocompleteItem,
 	EditorComponent,
@@ -52,6 +52,13 @@ import {
 	VERSION,
 } from "../../config.js";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.js";
+import type { ApprovalManagerEvent } from "../../core/approval/manager.js";
+import {
+	createSessionSafetyServices,
+	registerSessionSafetyServices,
+	type SessionSafetyServices,
+	unregisterSessionSafetyServices,
+} from "../../core/approval/runtime-services.js";
 import type { CompactionResult } from "../../core/compaction/index.js";
 import type {
 	ExtensionContext,
@@ -62,24 +69,87 @@ import type {
 } from "../../core/extensions/index.js";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.js";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.js";
+import { loadMcpConfig, removeUserMcpServer, setUserMcpServerDisabled } from "../../core/mcp/index.js";
 import { createCompactionSummaryMessage } from "../../core/messages.js";
-import { findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.js";
+import { resolveMissionFeatureSessionNavigation } from "../../core/missions/feature-session-navigation.js";
+import { MissionOrchestrator } from "../../core/missions/orchestrator.js";
+import {
+	buildMissionPlanningContext,
+	extractMissionPlanDisplayState,
+	looksLikeMissionPlanReadySignal,
+	type MissionPlanningSkill,
+	parseMissionPlan,
+} from "../../core/missions/planner.js";
+import { mergeMissionRuntimeSnapshot } from "../../core/missions/runtime-state.js";
+import { buildMissionSchedule } from "../../core/missions/scheduler.js";
+import {
+	appendMissionEvent,
+	clearMissionLink,
+	createMissionRecord,
+	listMissions,
+	loadMission,
+	readMissionLink,
+	saveMission,
+	saveMissionPlan,
+	updateMissionStatus,
+	writeMissionLink,
+} from "../../core/missions/store.js";
+import type { MissionFeatureRun, MissionRecord, MissionWorkerState } from "../../core/missions/types.js";
+import { findExactModelReferenceMatch, resolveCliModel, resolveModelScope } from "../../core/model-resolver.js";
 import { DefaultPackageManager } from "../../core/package-manager.js";
+import {
+	cycleInteractiveAutonomyPreset,
+	deriveInteractiveAutonomyPreset,
+	describeInteractiveAutonomyPreset,
+	type InteractiveAutonomyPreset,
+	resolveInteractiveAutonomyPreset,
+	type StandardInteractiveAutonomyPreset,
+} from "../../core/policy/interactive-autonomy.js";
+import type { ApprovalDecision, ApprovalRequest } from "../../core/policy/types.js";
 import type { ResourceDiagnostic } from "../../core/resource-loader.js";
 import { type SessionContext, SessionManager } from "../../core/session-manager.js";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.js";
+import { saveSpecArtifact } from "../../core/spec/artifact.js";
+import {
+	buildSpecExecutionContext,
+	buildSpecPlanningBlockedMessage,
+	buildSpecPlanningContext,
+	buildSpecPlanningContinuationContext,
+	collectSpecPlanningEvidence,
+	evaluateSpecPlanningGate,
+	extractProposedPlanDisplayState,
+	mergeSpecPlanningEvidence,
+	parseSpecPlan,
+	shouldAutoContinueSpecPlanning,
+} from "../../core/spec/plan.js";
+import {
+	createInactiveSpecState,
+	createSpecState,
+	getSpecStateEntry,
+	readLatestSpecState,
+	specHasPlan,
+	writeSpecState,
+} from "../../core/spec/state.js";
+import { getSpecPlanningToolNames } from "../../core/spec/tool-policy.js";
+import type { SpecSessionState } from "../../core/spec/types.js";
+import { discoverAgents, getDefaultProjectAgentsDir, getUserAgentsDir } from "../../core/subagents/agent-registry.js";
+import { agentExistsInDir, importClaudeAgents, scanClaudeAgents } from "../../core/subagents/claude-import.js";
+import { resolveChildSessionOpenMode } from "../../core/subagents/session-navigation.js";
 import { buildTaskNavigationContext } from "../../core/subagents/task-sessions.js";
-import type { LocatedTaskSession } from "../../core/subagents/types.js";
+import type { AgentConfig, DelegatedTaskApprovalRequest, LocatedTaskSession } from "../../core/subagents/types.js";
+import { type AskAnswer, type AskQuestion, registerAskHandler, unregisterAskHandler } from "../../core/tools/ask.js";
 import type { TruncationResult } from "../../core/tools/truncate.js";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.js";
 import { ensureTool } from "../../utils/tools-manager.js";
 import { ArminComponent } from "./components/armin.js";
+import { AskQuestionComponent } from "./components/ask-question.js";
 import { AssistantMessageComponent } from "./components/assistant-message.js";
 import { BashExecutionComponent } from "./components/bash-execution.js";
 import { BorderedLoader } from "./components/bordered-loader.js";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.js";
+import { getBuiltinMessageRenderer } from "./components/builtin-message-renderers.js";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.js";
 import { CustomEditor } from "./components/custom-editor.js";
 import { CustomMessageComponent } from "./components/custom-message.js";
@@ -91,6 +161,9 @@ import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { FooterComponent } from "./components/footer.js";
 import { keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
 import { LoginDialogComponent } from "./components/login-dialog.js";
+import { type MissionControlAction, MissionControlComponent } from "./components/mission-control.js";
+import { MissionListComponent } from "./components/mission-list.js";
+import { type MissionPlanOverviewChoice, MissionPlanOverviewComponent } from "./components/mission-plan-overview.js";
 import { ModelSelectorComponent } from "./components/model-selector.js";
 import { OAuthSelectorComponent } from "./components/oauth-selector.js";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
@@ -155,6 +228,7 @@ export class InteractiveMode {
 	private chatContainer: Container;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
+	private modeContainer: Container;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
 	private autocompleteProvider: CombinedAutocompleteProvider | undefined;
@@ -170,6 +244,10 @@ export class InteractiveMode {
 	private loadingAnimation: Loader | undefined = undefined;
 	private pendingWorkingMessage: string | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working...";
+	private workingElapsedMs = 0;
+	private workingStartedAt: number | undefined = undefined;
+	private workingTimerInterval: ReturnType<typeof setInterval> | undefined = undefined;
+	private specAutoContinuationActive = false;
 
 	private lastSigintTime = 0;
 	private lastEscapeTime = 0;
@@ -182,6 +260,7 @@ export class InteractiveMode {
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
 	private streamingMessage: AssistantMessage | undefined = undefined;
+	private streamingSpecPlanComponent: CustomMessageComponent | undefined = undefined;
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
@@ -253,6 +332,12 @@ export class InteractiveMode {
 	private detachedActiveStreamingMessage: AssistantMessage | undefined = undefined;
 	private detachedActiveToolComponents = new Map<string, ToolExecutionComponent>();
 	private detachedActivePendingToolIds = new Set<string>();
+	private safetyServices: SessionSafetyServices;
+	private approvalFlowActive = false;
+	private specState: SpecSessionState | undefined;
+	private missionState: MissionRecord | undefined;
+	private missionOrchestrator: MissionOrchestrator | undefined;
+	private missionRuntimeUpdateChain: Promise<void> = Promise.resolve();
 
 	// Convenience accessors
 	private get agent() {
@@ -530,6 +615,7 @@ export class InteractiveMode {
 		this.chatContainer = new Container();
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
+		this.modeContainer = new Container();
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
 		this.keybindings = KeybindingsManager.create();
@@ -546,6 +632,18 @@ export class InteractiveMode {
 		this.footerDataProvider = new FooterDataProvider();
 		this.footer = new FooterComponent(session, this.footerDataProvider);
 		this.footer.setAutoCompactEnabled(session.autoCompactionEnabled);
+		this.safetyServices = createSessionSafetyServices({
+			sessionManager: this.sessionManager,
+			settingsManager: this.settingsManager,
+			approvalMode: "interactive",
+		});
+		registerSessionSafetyServices(this.sessionManager, this.safetyServices);
+		this.safetyServices.approval.subscribe((event) => {
+			void this.handleApprovalManagerEvent(event);
+		});
+		this.specState = readLatestSpecState(this.sessionManager);
+		this.missionState = this.loadMissionStateFromSession();
+		this.syncInteractiveAskAvailability();
 
 		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -614,9 +712,14 @@ export class InteractiveMode {
 		const skillCommandList: SlashCommand[] = [];
 		if (this.settingsManager.getEnableSkillCommands()) {
 			for (const skill of this.session.resourceLoader.getSkills().skills) {
-				const commandName = `skill:${skill.name}`;
-				this.skillCommands.set(commandName, skill.filePath);
-				skillCommandList.push({ name: commandName, description: skill.description });
+				const prefixedName = `skill:${skill.name}`;
+				this.skillCommands.set(prefixedName, skill.filePath);
+				if (skill.userInvocable) {
+					// user-invocable skills appear in the slash command menu under both /skill-name and /skill:name
+					skillCommandList.push({ name: skill.name, description: skill.description });
+					skillCommandList.push({ name: prefixedName, description: skill.description });
+				}
+				// user-invocable: false skills are hidden from the menu but the AI can still auto-invoke them
 			}
 		}
 
@@ -718,6 +821,7 @@ export class InteractiveMode {
 		this.ui.addChild(this.statusContainer);
 		this.renderWidgets(); // Initialize with default spacer
 		this.ui.addChild(this.widgetContainerAbove);
+		this.ui.addChild(this.modeContainer);
 		this.ui.addChild(this.editorContainer);
 		this.ui.addChild(this.widgetContainerBelow);
 		this.ui.addChild(this.footer);
@@ -725,6 +829,7 @@ export class InteractiveMode {
 
 		this.setupKeyHandlers();
 		this.setupEditorSubmitHandler();
+		this.updateModeBanner();
 
 		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
 		this.ui.start();
@@ -816,10 +921,13 @@ export class InteractiveMode {
 			this.showWarning(modelFallbackMessage);
 		}
 
+		await this.reloadSpecStateFromSession();
+		this.reloadMissionStateFromSession();
+
 		// Process initial messages
 		if (initialMessage) {
 			try {
-				await this.session.prompt(initialMessage, { images: initialImages });
+				await this.withSpecContextPrompt(initialMessage, { images: initialImages });
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
@@ -829,7 +937,7 @@ export class InteractiveMode {
 		if (initialMessages) {
 			for (const message of initialMessages) {
 				try {
-					await this.session.prompt(message);
+					await this.withSpecContextPrompt(message);
 				} catch (error: unknown) {
 					const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 					this.showError(errorMessage);
@@ -841,7 +949,7 @@ export class InteractiveMode {
 		while (true) {
 			const userInput = await this.getUserInput();
 			try {
-				await this.session.prompt(userInput);
+				await this.withSpecContextPrompt(userInput);
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
@@ -1363,6 +1471,7 @@ export class InteractiveMode {
 			commandContextActions: {
 				waitForIdle: () => this.session.agent.waitForIdle(),
 				newSession: async (options) => {
+					this.specAutoContinuationActive = false;
 					if (this.loadingAnimation) {
 						this.loadingAnimation.stop();
 						this.loadingAnimation = undefined;
@@ -1374,6 +1483,7 @@ export class InteractiveMode {
 					if (!success) {
 						return { cancelled: true };
 					}
+					this.resetWorkingSessionTimer();
 
 					// Clear UI state
 					this.chatContainer.clear();
@@ -1390,10 +1500,12 @@ export class InteractiveMode {
 					return { cancelled: false };
 				},
 				fork: async (entryId) => {
+					this.specAutoContinuationActive = false;
 					const result = await this.session.fork(entryId);
 					if (result.cancelled) {
 						return { cancelled: true };
 					}
+					this.resetWorkingSessionTimer();
 
 					this.chatContainer.clear();
 					this.renderInitialMessages();
@@ -1403,6 +1515,7 @@ export class InteractiveMode {
 					return { cancelled: false };
 				},
 				navigateTree: async (targetId, options) => {
+					this.specAutoContinuationActive = false;
 					const result = await this.session.navigateTree(targetId, {
 						summarize: options?.summarize,
 						customInstructions: options?.customInstructions,
@@ -1412,6 +1525,7 @@ export class InteractiveMode {
 					if (result.cancelled) {
 						return { cancelled: true };
 					}
+					this.resetWorkingSessionTimer();
 
 					this.chatContainer.clear();
 					this.renderInitialMessages();
@@ -1797,6 +1911,7 @@ export class InteractiveMode {
 		title: string,
 		options: string[],
 		opts?: ExtensionUIDialogOptions,
+		highlightColor: ThemeColor = "accent",
 	): Promise<string | undefined> {
 		return new Promise((resolve) => {
 			if (opts?.signal?.aborted) {
@@ -1823,7 +1938,7 @@ export class InteractiveMode {
 					this.hideExtensionSelector();
 					resolve(undefined);
 				},
-				{ tui: this.ui, timeout: opts?.timeout },
+				{ tui: this.ui, timeout: opts?.timeout, highlightColor },
 			);
 
 			this.editorContainer.clear();
@@ -1855,6 +1970,1935 @@ export class InteractiveMode {
 	): Promise<boolean> {
 		const result = await this.showExtensionSelector(`${title}\n${message}`, ["Yes", "No"], opts);
 		return result === "Yes";
+	}
+
+	private async handleApprovalManagerEvent(event: ApprovalManagerEvent): Promise<void> {
+		if (event.type === "requested") {
+			this.showStatus(`Approval required: ${event.request.subject.displayTarget}`);
+			if (!this.approvalFlowActive) {
+				await this.openApprovalCenter(event.request.id);
+			}
+			return;
+		}
+
+		const prefix = event.result.allowed ? "Approved" : "Rejected";
+		this.showStatus(`${prefix}: ${event.request.subject.displayTarget}`);
+	}
+
+	private async handleApprovalsCommand(): Promise<void> {
+		const pending = this.safetyServices.approval.getPendingRequests();
+		if (pending.length === 0) {
+			this.showStatus("No pending approvals");
+			return;
+		}
+		await this.openApprovalCenter();
+	}
+
+	private async handleMcpCommand(): Promise<void> {
+		const mcpManager = this.session.mcpManager;
+		const infos = mcpManager.getServerInfos();
+
+		if (infos.length === 0) {
+			this.showStatus("No MCP servers configured. Use `hirocode mcp add` to add servers.");
+			return;
+		}
+
+		const items = infos.map((info) => {
+			let icon: string;
+			if (info.status.status === "connected") icon = "✓";
+			else if (info.status.status === "disabled") icon = "○";
+			else if (info.status.status === "needs_auth") icon = "⚠";
+			else icon = "✗";
+			const toolCount = info.tools.length;
+			const statusText =
+				info.status.status === "failed" ? `failed: ${(info.status as any).error}` : info.status.status;
+			return `${icon} ${info.name} (${statusText}${toolCount > 0 ? `, ${toolCount} tools` : ""})`;
+		});
+
+		const result = await this.showExtensionSelector("MCP Servers", items);
+		if (result === undefined) return;
+
+		const idx = items.indexOf(result);
+		if (idx < 0 || idx >= infos.length) return;
+
+		const info = infos[idx];
+		await this.handleMcpServerAction(info);
+	}
+
+	private async handleMcpServerAction(
+		info: ReturnType<typeof this.session.mcpManager.getServerInfos>[number],
+	): Promise<void> {
+		const mcpManager = this.session.mcpManager;
+		const isDisabled = info.config.disabled ?? false;
+		const isHttp = info.config.type === "http";
+		const needsAuth = info.status.status === "needs_auth";
+
+		const { user: userConfig } = loadMcpConfig();
+		const isUserServer = info.name in userConfig.mcpServers;
+
+		const actions: string[] = [];
+		actions.push(isDisabled ? "Enable" : "Disable");
+		if (info.tools.length > 0) actions.push("View tools");
+		if (isHttp && needsAuth) actions.push("Authenticate");
+		if (isHttp) actions.push("Clear auth");
+		if (isUserServer) actions.push("Remove");
+
+		const action = await this.showExtensionSelector(`${info.name} — actions`, actions);
+		if (action === undefined) return;
+
+		if (action === "Enable" || action === "Disable") {
+			this.showStatus(`${action === "Enable" ? "Enabling" : "Disabling"} ${info.name}...`);
+			setUserMcpServerDisabled(info.name, action === "Disable");
+			await mcpManager.reload(true);
+			(this.session as any)._refreshToolRegistry();
+			this.showStatus(`MCP server "${info.name}" ${action === "Enable" ? "enabled" : "disabled"}.`);
+		} else if (action === "View tools") {
+			const toolItems = info.tools.map((t) => `${t.name}${t.description ? ` — ${t.description}` : ""}`);
+			if (toolItems.length === 0) {
+				this.showStatus("No tools available.");
+				return;
+			}
+			await this.showExtensionSelector(`${info.name} — ${toolItems.length} tools`, toolItems);
+		} else if (action === "Authenticate") {
+			this.showStatus(`Authenticating ${info.name}... Check your browser.`);
+			try {
+				const status = await mcpManager.authenticate(info.name);
+				if (status.status === "connected") {
+					(this.session as any)._refreshToolRegistry();
+					this.showStatus(`MCP server "${info.name}" authenticated and connected.`);
+				} else {
+					this.showStatus(`Authentication result: ${status.status}`);
+				}
+			} catch (error) {
+				this.showStatus(`Auth failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		} else if (action === "Clear auth") {
+			await mcpManager.removeAuth(info.name);
+			this.showStatus(`Cleared OAuth credentials for "${info.name}".`);
+		} else if (action === "Remove") {
+			const removed = removeUserMcpServer(info.name);
+			if (removed) {
+				await mcpManager.reload(true);
+				(this.session as any)._refreshToolRegistry();
+				this.showStatus(`Removed MCP server "${info.name}".`);
+			} else {
+				this.showStatus(`Cannot remove "${info.name}" — not in user config.`);
+			}
+		}
+	}
+
+	private async openApprovalCenter(preferredRequestId?: string): Promise<void> {
+		if (this.approvalFlowActive) {
+			return;
+		}
+
+		this.approvalFlowActive = true;
+		try {
+			let preferredId = preferredRequestId;
+			while (true) {
+				const pending = this.safetyServices.approval.getPendingRequests();
+				if (pending.length === 0) {
+					return;
+				}
+
+				let request = preferredId ? pending.find((item) => item.id === preferredId) : undefined;
+				preferredId = undefined;
+
+				if (!request) {
+					if (pending.length === 1) {
+						request = pending[0];
+					} else {
+						const labels = pending.map((item) => this.formatApprovalQueueLabel(item));
+						const selected = await this.showExtensionSelector(
+							"Approval Queue\nSelect a pending approval request to review.",
+							labels,
+						);
+						if (!selected) {
+							this.showStatus(
+								`${pending.length} approval request${pending.length > 1 ? "s" : ""} still pending`,
+							);
+							return;
+						}
+						request = pending.find((item) => this.formatApprovalQueueLabel(item) === selected);
+					}
+				}
+
+				if (!request) {
+					return;
+				}
+
+				const decision = await this.showApprovalDecision(request, pending.length);
+				if (!decision) {
+					this.showStatus(`${pending.length} approval request${pending.length > 1 ? "s" : ""} still pending`);
+					return;
+				}
+
+				this.safetyServices.approval.resolve(decision);
+			}
+		} finally {
+			this.approvalFlowActive = false;
+		}
+	}
+
+	private formatApprovalQueueLabel(request: ApprovalRequest): string {
+		return `[${request.subject.level}] ${request.subject.permission} ${request.subject.displayTarget}`;
+	}
+
+	private async showApprovalDecision(
+		request: ApprovalRequest,
+		pendingCount: number,
+	): Promise<ApprovalDecision | undefined> {
+		const options = ["Allow once", "Allow for session", "Allow for project", "Allow globally", "Reject"];
+		const selected = await this.showExtensionSelector(this.formatApprovalPrompt(request, pendingCount), options);
+		if (!selected) {
+			return undefined;
+		}
+		if (selected === "Reject") {
+			return {
+				requestId: request.id,
+				action: "deny",
+				scope: "once",
+				reason: `Rejected in interactive approval queue for ${request.subject.displayTarget}`,
+			};
+		}
+		const scope =
+			selected === "Allow for session"
+				? "session"
+				: selected === "Allow for project"
+					? "project"
+					: selected === "Allow globally"
+						? "global"
+						: "once";
+		return {
+			requestId: request.id,
+			action: "allow",
+			scope,
+			reason: `Approved in interactive approval queue for ${request.subject.displayTarget}`,
+		};
+	}
+
+	private formatApprovalPrompt(request: ApprovalRequest, pendingCount: number): string {
+		const lines = [
+			`Approval Request ${pendingCount > 1 ? `(queue size ${pendingCount})` : ""}`,
+			"",
+			`Summary: ${request.subject.summary}`,
+			`Permission: ${request.subject.permission}`,
+			`Target: ${request.subject.displayTarget}`,
+			`Risk: ${request.subject.level}`,
+			`Why: ${request.subject.justification}`,
+		];
+		const command =
+			typeof request.subject.metadata?.command === "string" ? request.subject.metadata.command : undefined;
+		if (command) {
+			lines.push("", `Command: ${command}`);
+		}
+		const directories = Array.isArray(request.subject.metadata?.externalDirectories)
+			? request.subject.metadata.externalDirectories
+			: [];
+		if (directories.length > 0) {
+			lines.push("", `External dirs: ${directories.join(", ")}`);
+		}
+		return lines.join("\n");
+	}
+
+	private loadMissionStateFromSession(): MissionRecord | undefined {
+		const link = readMissionLink(this.sessionManager);
+		if (!link) {
+			return undefined;
+		}
+		return loadMission(this.sessionManager.getCwd(), link.missionId);
+	}
+
+	private async persistMissionState(mission: MissionRecord): Promise<void> {
+		await saveMission(mission);
+		writeMissionLink(this.sessionManager, mission);
+		this.missionState = mission;
+		this.syncInteractiveAskAvailability();
+		this.updateMissionWidget();
+		this.updateModeBanner();
+	}
+
+	private enqueueMissionRuntimeUpdate(mission: MissionRecord): void {
+		this.missionRuntimeUpdateChain = this.missionRuntimeUpdateChain
+			.then(async () => {
+				if (!this.missionState && !this.missionOrchestrator) {
+					return;
+				}
+				if (this.missionState && this.missionState.id !== mission.id) {
+					return;
+				}
+				const merged = mergeMissionRuntimeSnapshot(this.missionState, mission);
+				await this.persistMissionState(merged);
+			})
+			.catch((error: unknown) => {
+				this.showError(error instanceof Error ? error.message : String(error));
+			});
+	}
+
+	private reloadMissionStateFromSession(): void {
+		this.missionState = this.loadMissionStateFromSession();
+		this.syncInteractiveAskAvailability();
+		this.updateMissionWidget();
+		this.updateModeBanner();
+	}
+
+	private getAvailableSkillsForMission(): MissionPlanningSkill[] {
+		return this.session.resourceLoader
+			.getSkills()
+			.skills.map((skill) => ({ name: skill.name, description: skill.description }));
+	}
+
+	private updateMissionWidget(): void {
+		if (!this.missionState) {
+			this.setExtensionWidget("__mission_control__", undefined);
+			this.updateModeBanner();
+			return;
+		}
+		this.setExtensionWidget("__mission_control__", this.formatMissionControlLines(this.missionState), {
+			placement: "aboveEditor",
+		});
+		this.updateModeBanner();
+	}
+
+	private formatMissionControlLines(mission: MissionRecord): string[] {
+		const lines = [
+			`${theme.fg("accent", "Mission Control")} ${theme.fg("muted", mission.title)}`,
+			`${theme.fg("muted", "Status:")} ${mission.status}${mission.currentMilestoneId ? `  ${theme.fg("muted", "Milestone:")} ${mission.currentMilestoneId}` : ""}`,
+		];
+		if (mission.status === "planning" && mission.plan) {
+			lines.push(
+				theme.fg(
+					"muted",
+					`Plan: ${mission.plan.features.length} features / ${mission.plan.milestones.length} milestones`,
+				),
+			);
+		}
+		const featureRuns = mission.plan?.features.map((feature) => {
+			const run = mission.featureRuns[feature.id];
+			const state = run?.status ?? "pending";
+			const symbol =
+				state === "completed"
+					? theme.fg("success", "[ok]")
+					: state === "running"
+						? theme.fg("accent", "[..]")
+						: state === "failed" || state === "blocked"
+							? theme.fg("error", "[x]")
+							: theme.fg("muted", "[ ]");
+			return `${symbol} ${feature.title}`;
+		});
+		if (featureRuns && featureRuns.length > 0) {
+			lines.push(...featureRuns.slice(0, 8));
+			if (featureRuns.length > 8) {
+				lines.push(theme.fg("muted", `... ${featureRuns.length - 8} more features`));
+			}
+		}
+		const runningWorkers = Object.values(mission.workers).filter((worker) => worker.status === "running");
+		if (runningWorkers.length > 0) {
+			lines.push(theme.fg("muted", `Active workers: ${runningWorkers.length}`));
+			for (const worker of runningWorkers.slice(0, 3)) {
+				lines.push(
+					theme.fg(
+						"dim",
+						`  ${worker.featureId}${worker.lastTool ? ` -> ${worker.lastTool}` : ""}${worker.branch ? ` (${worker.branch})` : ""}`,
+					),
+				);
+			}
+		}
+		const pendingApprovals = this.safetyServices.approval.getPendingRequests().length;
+		if (pendingApprovals > 0) {
+			lines.push(theme.fg("warning", `Pending approvals: ${pendingApprovals}`));
+		}
+		const currentValidation = mission.currentMilestoneId
+			? mission.validationReports[mission.currentMilestoneId]
+			: undefined;
+		if (currentValidation) {
+			lines.push(
+				currentValidation.status === "passed"
+					? theme.fg("success", `Validation passed: ${mission.currentMilestoneId}`)
+					: theme.fg("error", `Validation failed: ${mission.currentMilestoneId}`),
+			);
+		}
+		if (mission.pausedReason) {
+			lines.push(theme.fg("warning", mission.pausedReason));
+		}
+		lines.push(theme.fg("muted", "Use /mission for control actions"));
+		return lines;
+	}
+
+	private buildMissionExecutionContext(mission: MissionRecord): string {
+		const lines = [
+			`[MISSION CONTROL ACTIVE]`,
+			`Mission: ${mission.title}`,
+			`Status: ${mission.status}`,
+			mission.currentMilestoneId ? `Current milestone: ${mission.currentMilestoneId}` : undefined,
+			mission.plan ? mission.plan.markdown : undefined,
+		]
+			.filter((line): line is string => Boolean(line))
+			.join("\n\n");
+		return lines;
+	}
+
+	private createMissionOrchestrator(): MissionOrchestrator {
+		return new MissionOrchestrator(this.sessionManager, {
+			onMissionUpdate: (mission, event) => {
+				this.enqueueMissionRuntimeUpdate({ ...mission });
+				if (event.type === "mission_paused") {
+					this.showWarning(event.reason ?? "Mission paused");
+				}
+				if (event.type === "milestone_validated") {
+					this.showStatus(`Milestone ${event.milestoneId} ${event.status}`);
+				}
+			},
+			onDelegatedApproval: (request) => this.handleMissionDelegatedApproval(request),
+		});
+	}
+
+	private isSpecMaskEnabled(state: SpecSessionState | undefined = this.specState): boolean {
+		return Boolean(state && state.phase !== "inactive" && state.maskEnabled !== false);
+	}
+
+	private hasMissionModeIndicator(): boolean {
+		return Boolean(this.missionState && ["planning", "running", "paused"].includes(this.missionState.status));
+	}
+
+	private getSpecThemeColor(): ThemeColor {
+		return "customMessageLabel";
+	}
+
+	private clearWorkingSessionTimerInterval(): void {
+		if (this.workingTimerInterval) {
+			clearInterval(this.workingTimerInterval);
+			this.workingTimerInterval = undefined;
+		}
+	}
+
+	private refreshWorkingSessionTimerDisplay(): void {
+		this.updateModeBanner();
+		this.ui.requestRender();
+	}
+
+	private getWorkingSessionElapsedMs(): number {
+		if (this.workingStartedAt === undefined) {
+			return this.workingElapsedMs;
+		}
+		return this.workingElapsedMs + (Date.now() - this.workingStartedAt);
+	}
+
+	private getWorkingSessionTimerLabel(): string {
+		const totalSeconds = Math.floor(this.getWorkingSessionElapsedMs() / 1000);
+		if (totalSeconds < 60) {
+			return `\u23F1\uFE0F${totalSeconds}s`;
+		}
+		if (totalSeconds < 3600) {
+			const minutes = Math.floor(totalSeconds / 60);
+			const seconds = totalSeconds % 60;
+			return `\u23F1\uFE0F${minutes}m ${seconds}s`;
+		}
+		const hours = Math.floor(totalSeconds / 3600);
+		const remainingSeconds = totalSeconds % 3600;
+		const minutes = Math.floor(remainingSeconds / 60);
+		const seconds = remainingSeconds % 60;
+		return `\u23F1\uFE0F${hours}h ${minutes}m ${seconds}s`;
+	}
+
+	private startWorkingSessionTimer(): void {
+		if (this.workingStartedAt !== undefined) {
+			return;
+		}
+
+		this.workingStartedAt = Date.now();
+		this.clearWorkingSessionTimerInterval();
+		this.workingTimerInterval = setInterval(() => {
+			if (this.workingStartedAt === undefined) {
+				return;
+			}
+			this.refreshWorkingSessionTimerDisplay();
+		}, 1000);
+		this.refreshWorkingSessionTimerDisplay();
+	}
+
+	private stopWorkingSessionTimer(): void {
+		if (this.workingStartedAt !== undefined) {
+			this.workingElapsedMs += Date.now() - this.workingStartedAt;
+			this.workingStartedAt = undefined;
+		}
+		this.clearWorkingSessionTimerInterval();
+		this.refreshWorkingSessionTimerDisplay();
+	}
+
+	private resetWorkingSessionTimer(refresh = true): void {
+		this.workingElapsedMs = 0;
+		this.workingStartedAt = undefined;
+		this.clearWorkingSessionTimerInterval();
+		if (refresh) {
+			this.refreshWorkingSessionTimerDisplay();
+		}
+	}
+
+	private getSpecWidgetTitleLine(): string {
+		if (!specHasPlan(this.specState)) {
+			return theme.fg(this.getSpecThemeColor(), "Specification");
+		}
+
+		const title = this.specState.plan.title.trim();
+		if (!title || title === "Specification Plan") {
+			return theme.fg(this.getSpecThemeColor(), "Specification");
+		}
+
+		return `${theme.fg(this.getSpecThemeColor(), "Specification")} ${theme.fg("muted", title)}`;
+	}
+
+	private createInteractiveAskHandler() {
+		return (questions: AskQuestion[]) =>
+			this.showExtensionCustom<AskAnswer[]>(
+				(_tui, _theme, _keybindings, done) =>
+					new AskQuestionComponent({
+						questions,
+						onSubmit: (answers) => done(answers),
+						onCancel: () => done(questions.map((q) => q.options[0]?.label ?? "")),
+					}),
+			);
+	}
+
+	private shouldEnableInteractiveAsk(): boolean {
+		const missionPlanning = this.missionState?.status === "planning";
+		const specPlanning = this.specState?.phase === "planning" && this.isSpecMaskEnabled();
+		return Boolean(missionPlanning || specPlanning);
+	}
+
+	private syncInteractiveAskAvailability(): void {
+		const currentTools = this.session.getActiveToolNames();
+		if (this.shouldEnableInteractiveAsk()) {
+			registerAskHandler(this.sessionManager, this.createInteractiveAskHandler());
+			if (!currentTools.includes("ask")) {
+				this.session.setActiveToolsByName([...currentTools, "ask"]);
+			}
+			return;
+		}
+
+		unregisterAskHandler(this.sessionManager);
+		if (currentTools.includes("ask")) {
+			this.session.setActiveToolsByName(currentTools.filter((name) => name !== "ask"));
+		}
+	}
+
+	private getInteractiveAutonomyPreset(): InteractiveAutonomyPreset {
+		return deriveInteractiveAutonomyPreset(
+			this.settingsManager.getApprovalPolicy(),
+			this.settingsManager.getAutonomyMode(),
+		);
+	}
+
+	private setRuntimeInteractiveAutonomyPreset(preset: StandardInteractiveAutonomyPreset): void {
+		this.settingsManager.applyOverrides(resolveInteractiveAutonomyPreset(preset));
+		this.updateModeBanner();
+	}
+
+	private setPersistentInteractiveAutonomyPreset(
+		preset: StandardInteractiveAutonomyPreset,
+	): ReturnType<typeof resolveInteractiveAutonomyPreset> {
+		const next = resolveInteractiveAutonomyPreset(preset);
+		this.settingsManager.setApprovalPolicy(next.approvalPolicy);
+		this.settingsManager.setAutonomyMode(next.autonomyMode);
+		return next;
+	}
+
+	private getAutonomyModeDisplay(): { label: string; description: string } {
+		if (this.specState?.phase === "planning" && this.isSpecMaskEnabled()) {
+			return { label: "Auto (Spec)", description: "planning stays read-only under spec rules" };
+		}
+
+		return describeInteractiveAutonomyPreset(this.getInteractiveAutonomyPreset());
+	}
+
+	private getSpecModeDisplay(): string | undefined {
+		if (!this.isSpecMaskEnabled()) {
+			return undefined;
+		}
+		if (!this.specState || this.specState.phase === "inactive") {
+			return undefined;
+		}
+		if (this.specState.phase === "planning") {
+			return "Spec (Planning)";
+		}
+		if (this.specState.phase === "approved") {
+			return "Spec (Approved)";
+		}
+		return "Spec (Executing)";
+	}
+
+	private updateModeBanner(): void {
+		this.modeContainer.clear();
+		const auto = this.getAutonomyModeDisplay();
+		const segments: string[] = [];
+		const spec = this.getSpecModeDisplay();
+		if (spec) {
+			segments.push(theme.fg(this.getSpecThemeColor(), spec));
+		}
+		segments.push(theme.fg(spec ? "muted" : "accent", `${auto.label} - ${auto.description}`));
+		if (this.hasMissionModeIndicator() && this.missionState) {
+			segments.push(theme.fg("warning", `Mission (${this.capitalize(this.missionState.status)})`));
+		}
+
+		this.modeContainer.addChild(new TruncatedText(segments.join(theme.fg("dim", " • ")), 1, 0));
+		const hints = [
+			theme.fg("muted", this.getWorkingSessionTimerLabel()),
+			keyHint("app.spec.toggle", "toggle spec"),
+			keyHint("app.autonomy.cycle", "cycle auto"),
+		];
+		if (this.hasMissionModeIndicator()) {
+			hints.push(theme.fg("muted", "Use /mission for mission control"));
+		}
+		this.modeContainer.addChild(new TruncatedText(hints.join(theme.fg("dim", "  ")), 1, 0));
+	}
+
+	private async toggleSpecMask(): Promise<void> {
+		if (this.hasMissionModeIndicator() && !this.specState) {
+			this.showWarning("Mission is active. Use /mission to manage the mission before starting specification mode.");
+			return;
+		}
+
+		if (!this.specState || this.specState.phase === "inactive") {
+			await this.enterSpecMode();
+			return;
+		}
+
+		if (this.isSpecMaskEnabled()) {
+			await this.restoreSessionAfterSpec(this.specState);
+			this.persistSpecState(createSpecState({ ...this.specState, maskEnabled: false }));
+			await this.applySpecStateToSession(this.specState);
+			this.showStatus("Specification mode disabled for future turns");
+			return;
+		}
+
+		this.persistSpecState(createSpecState({ ...this.specState, maskEnabled: true }));
+		if (this.specState.phase === "planning") {
+			await this.applySpecStateToSession(this.specState);
+		} else {
+			this.updateModeBanner();
+			this.showStatus(
+				this.specState.phase === "approved"
+					? "Specification mode re-enabled. Use /spec to review or approve the current plan."
+					: "Specification execution context re-enabled.",
+			);
+		}
+	}
+
+	private cycleAutonomyMode(): void {
+		const next = cycleInteractiveAutonomyPreset(this.getInteractiveAutonomyPreset());
+		this.setRuntimeInteractiveAutonomyPreset(next);
+		const auto = this.getAutonomyModeDisplay();
+		this.showStatus(`${auto.label}: ${auto.description}`);
+	}
+
+	private updateSpecWidget(): void {
+		if (!specHasPlan(this.specState) || this.missionState || !this.isSpecMaskEnabled()) {
+			this.setExtensionWidget("__spec_card__", undefined);
+			return;
+		}
+		this.setExtensionWidget(
+			"__spec_card__",
+			[
+				this.getSpecWidgetTitleLine(),
+				`${theme.fg("muted", "Use ")}${theme.fg(this.getSpecThemeColor(), "/spec")}${theme.fg("muted", " to review, approve, or iterate on the current plan")}`,
+			],
+			{ placement: "aboveEditor" },
+		);
+	}
+
+	private async showSpecSelector(): Promise<void> {
+		if (!specHasPlan(this.specState)) {
+			this.handleSpecStatus();
+			return;
+		}
+
+		const title = `Specification ready: ${this.specState.plan.title}`;
+		const options =
+			this.specState.phase === "executing"
+				? ["Return to planning", "Clear specification mode"]
+				: [
+						"Proceed with implementation",
+						"Proceed, and allow file edits and read-only commands (Low)",
+						"Proceed, and allow reversible commands (Medium)",
+						"Proceed, and allow all commands (High)",
+						"Keep iterating on spec",
+					];
+		const choice = await this.showExtensionSelector(title, options, undefined, this.getSpecThemeColor());
+		if (!choice) {
+			return;
+		}
+
+		if (choice === "Proceed with implementation") {
+			this.setRuntimeInteractiveAutonomyPreset("manual");
+			await this.beginSpecExecution();
+			return;
+		}
+		if (choice === "Proceed, and allow file edits and read-only commands (Low)") {
+			this.setRuntimeInteractiveAutonomyPreset("auto-low");
+			this.showStatus("Proceeding with approved spec using low autonomy for the rest of this session.");
+			await this.beginSpecExecution();
+			return;
+		}
+		if (choice === "Proceed, and allow reversible commands (Medium)") {
+			this.setRuntimeInteractiveAutonomyPreset("auto-medium");
+			this.showStatus("Proceeding with approved spec using medium autonomy for the rest of this session.");
+			await this.beginSpecExecution();
+			return;
+		}
+		if (choice === "Proceed, and allow all commands (High)") {
+			this.setRuntimeInteractiveAutonomyPreset("auto-high");
+			this.showStatus("Proceeding with approved spec using high autonomy for the rest of this session.");
+			await this.beginSpecExecution();
+			return;
+		}
+		if (choice === "Keep iterating on spec" || choice === "Return to planning") {
+			if (this.specState) {
+				if (this.specState.phase === "executing") {
+					await this.restoreSessionAfterSpec(this.specState);
+				}
+				this.persistSpecState(
+					createSpecState({
+						...this.specState,
+						phase: "planning",
+						maskEnabled: true,
+						planningStartedAt: undefined,
+						planningTurnCount: undefined,
+						planningEvidence: undefined,
+					}),
+				);
+				await this.applySpecStateToSession(this.specState);
+				this.showStatus("Specification plan unlocked for iteration");
+			}
+			return;
+		}
+		if (choice === "Clear specification mode") {
+			await this.clearSpecMode();
+		}
+	}
+
+	private getAssistantText(message: AssistantMessage): string {
+		return message.content
+			.filter((part): part is TextContent => part.type === "text")
+			.map((part) => part.text)
+			.join("\n");
+	}
+
+	private getLastAssistantMessage(messages: readonly AgentMessage[]): AssistantMessage | undefined {
+		for (let index = messages.length - 1; index >= 0; index -= 1) {
+			const message = messages[index];
+			if (message.role === "assistant") {
+				return message;
+			}
+		}
+		return undefined;
+	}
+
+	private getLastPersistedAssistantMessageAfterLatestSpecState(): AssistantMessage | undefined {
+		const entries = this.sessionManager.getEntries();
+		let latestSpecStateIndex = -1;
+		for (let index = entries.length - 1; index >= 0; index -= 1) {
+			const entry = entries[index];
+			if (entry.type === "custom" && getSpecStateEntry(entry)) {
+				latestSpecStateIndex = index;
+				break;
+			}
+		}
+
+		for (let index = entries.length - 1; index > latestSpecStateIndex; index -= 1) {
+			const entry = entries[index];
+			if (entry.type === "message" && entry.message.role === "assistant") {
+				return entry.message;
+			}
+		}
+
+		return undefined;
+	}
+
+	private formatSpecPlanningGateStatus(missing: string[]): string {
+		return [
+			"Specification plan blocked until the planning prerequisites are complete:",
+			...missing.map((item) => `- ${item}`),
+		].join("\n");
+	}
+
+	private showSpecPlanningBlockedFeedback(missing: string[]): void {
+		this.addMessageToChat({
+			role: "custom",
+			customType: "spec-plan-blocked",
+			content: buildSpecPlanningBlockedMessage(missing),
+			display: true,
+			timestamp: Date.now(),
+		});
+	}
+
+	private persistSpecState(state: SpecSessionState): void {
+		const { updatedAt: _updatedAt, ...rest } = state;
+		this.specState = writeSpecState(this.sessionManager, rest);
+		this.syncInteractiveAskAvailability();
+		this.updateSpecWidget();
+		this.updateModeBanner();
+	}
+
+	private async restoreSessionAfterSpec(state: SpecSessionState | undefined): Promise<void> {
+		if (!state) {
+			return;
+		}
+		if (state.previousActiveTools && state.previousActiveTools.length > 0) {
+			this.session.setActiveToolsByName(state.previousActiveTools);
+		}
+		if (state.previousModel?.provider && state.previousModel?.modelId) {
+			const model = this.session.modelRegistry.find(state.previousModel.provider, state.previousModel.modelId);
+			if (model) {
+				await this.session.setModel(model);
+				if (state.previousModel.thinkingLevel) {
+					this.session.setThinkingLevel(state.previousModel.thinkingLevel);
+				}
+			}
+		}
+	}
+
+	private createInterruptedSpecState(state: SpecSessionState): SpecSessionState {
+		return createSpecState({
+			...state,
+			maskEnabled: false,
+			phase: "approved",
+		});
+	}
+
+	private async finalizeSpecExecutionState(
+		state: SpecSessionState,
+		nextState: SpecSessionState,
+		statusMessage?: string,
+	): Promise<void> {
+		this.specAutoContinuationActive = false;
+		await this.restoreSessionAfterSpec(state);
+		this.persistSpecState(nextState);
+		await this.applySpecStateToSession(this.specState);
+		if (statusMessage) {
+			this.showStatus(statusMessage);
+		}
+	}
+
+	private async applySpecStateToSession(state: SpecSessionState | undefined): Promise<void> {
+		this.specState = state;
+		this.syncInteractiveAskAvailability();
+		this.clearStreamingSpecPlan();
+		this.session.removeCustomMessages(["spec-mode-context", "spec-approved", "spec-plan"]);
+		this.updateSpecWidget();
+		this.updateModeBanner();
+		if (!state || state.phase === "inactive" || !this.isSpecMaskEnabled(state)) {
+			return;
+		}
+
+		if (state.phase === "planning") {
+			this.session.setActiveToolsByName(getSpecPlanningToolNames());
+			if (state.planningModel?.provider && state.planningModel.modelId) {
+				const model = this.session.modelRegistry.find(state.planningModel.provider, state.planningModel.modelId);
+				if (model) {
+					await this.session.setModel(model);
+					if (state.planningModel.thinkingLevel) {
+						this.session.setThinkingLevel(state.planningModel.thinkingLevel);
+					}
+				}
+			}
+			this.showStatus(`Specification mode active${state.title ? `: ${state.title}` : ""}`);
+			return;
+		}
+
+		if (state.phase === "approved") {
+			this.showStatus(`Specification ready for approval${state.title ? `: ${state.title}` : ""}`);
+			return;
+		}
+
+		if (state.phase === "executing") {
+			this.showStatus(`Executing approved spec${state.title ? `: ${state.title}` : ""}`);
+		}
+	}
+
+	private async reloadSpecStateFromSession(options?: { restoreFallback?: boolean }): Promise<void> {
+		const previous = this.specState;
+		const next = readLatestSpecState(this.sessionManager);
+		if (!next && options?.restoreFallback && previous) {
+			await this.restoreSessionAfterSpec(previous);
+		}
+		if (next?.phase === "executing" && !this.session.isStreaming) {
+			const recoveredAssistant = this.getLastPersistedAssistantMessageAfterLatestSpecState();
+			const normalizedState =
+				recoveredAssistant?.stopReason === "stop"
+					? createInactiveSpecState(next)
+					: this.createInterruptedSpecState(next);
+			await this.finalizeSpecExecutionState(next, normalizedState);
+			return;
+		}
+		await this.applySpecStateToSession(next);
+	}
+
+	private async withSpecContextPrompt(
+		text: string,
+		options?: { images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" },
+	): Promise<void> {
+		this.session.removeCustomMessages(["spec-mode-context", "mission-mode-context"]);
+		if (this.missionState && ["planning", "running", "paused"].includes(this.missionState.status)) {
+			const missionContext =
+				this.missionState.status === "planning"
+					? buildMissionPlanningContext(this.getAvailableSkillsForMission(), {
+							userConfirmedReady: looksLikeMissionPlanReadySignal(text),
+						})
+					: this.buildMissionExecutionContext(this.missionState);
+			const deliverAs =
+				options?.streamingBehavior === "followUp"
+					? "followUp"
+					: options?.streamingBehavior === "steer"
+						? "steer"
+						: "nextTurn";
+			await this.session.sendCustomMessage(
+				{ customType: "mission-mode-context", content: missionContext, display: false },
+				{ deliverAs },
+			);
+			await this.session.prompt(text, options);
+			return;
+		}
+
+		if (!this.specState || this.specState.phase === "inactive" || !this.isSpecMaskEnabled()) {
+			await this.session.prompt(text, options);
+			return;
+		}
+
+		if (this.specState.phase === "approved") {
+			this.persistSpecState(
+				createSpecState({
+					...this.specState,
+					phase: "planning",
+					planningStartedAt: undefined,
+					planningTurnCount: undefined,
+					planningEvidence: undefined,
+				}),
+			);
+			await this.applySpecStateToSession(this.specState);
+		}
+
+		const context =
+			this.specState.phase === "planning"
+				? buildSpecPlanningContext()
+				: specHasPlan(this.specState) && this.specState.phase === "executing"
+					? buildSpecExecutionContext(this.specState.plan, this.specState.artifactPath)
+					: undefined;
+
+		if (context) {
+			const deliverAs =
+				options?.streamingBehavior === "followUp"
+					? "followUp"
+					: options?.streamingBehavior === "steer"
+						? "steer"
+						: "nextTurn";
+			await this.session.sendCustomMessage(
+				{ customType: "spec-mode-context", content: context, display: false },
+				{ deliverAs },
+			);
+		}
+
+		await this.session.prompt(text, options);
+	}
+
+	private async triggerSpecPlanningAutoContinuationTurn(missing: string[]): Promise<void> {
+		this.specAutoContinuationActive = true;
+		this.session.removeCustomMessages(["spec-mode-context", "mission-mode-context", "spec-planning-continuation"]);
+		await this.session.sendCustomMessage(
+			{ customType: "spec-mode-context", content: buildSpecPlanningContext(), display: false },
+			{ deliverAs: "nextTurn" },
+		);
+		await this.session.sendCustomMessage(
+			{
+				customType: "spec-planning-continuation",
+				content: buildSpecPlanningContinuationContext(missing),
+				display: false,
+			},
+			{ triggerTurn: true },
+		);
+	}
+
+	private async enterSpecMode(initialRequest?: string): Promise<void> {
+		if (this.specState?.phase !== "planning") {
+			const currentModel = this.session.model;
+			const next = createSpecState({
+				id: this.specState?.phase === "inactive" ? this.specState.id : undefined,
+				maskEnabled: true,
+				phase: "planning",
+				request: initialRequest,
+				previousActiveTools: this.session.getActiveToolNames(),
+				planningModel: this.specState?.planningModel,
+				previousModel: currentModel
+					? {
+							provider: currentModel.provider,
+							modelId: currentModel.id,
+							thinkingLevel: this.session.thinkingLevel,
+						}
+					: undefined,
+			});
+			this.persistSpecState(next);
+			await this.applySpecStateToSession(this.specState);
+		}
+
+		if (initialRequest) {
+			this.editor.setText("");
+			this.editor.addToHistory?.(`/spec ${initialRequest}`);
+			await this.withSpecContextPrompt(initialRequest);
+			return;
+		}
+
+		this.showStatus("Specification mode enabled. Describe the feature to plan.");
+	}
+
+	private handleSpecStatus(): void {
+		if (!this.specState || this.specState.phase === "inactive") {
+			this.showStatus("No active specification plan");
+			return;
+		}
+
+		const lines = [
+			`Specification mode: ${this.specState.phase}`,
+			this.specState.phase === "approved" ? "Plan is waiting for approval or iteration." : undefined,
+			this.specState.title ? `Title: ${this.specState.title}` : undefined,
+			this.specState.artifactPath ? `Artifact: ${this.specState.artifactPath}` : undefined,
+		]
+			.filter((line): line is string => Boolean(line))
+			.join("\n");
+		this.showStatus(lines);
+	}
+
+	private async clearSpecMode(): Promise<void> {
+		await this.restoreSessionAfterSpec(this.specState);
+		this.persistSpecState(createInactiveSpecState(this.specState));
+		await this.applySpecStateToSession(this.specState);
+		this.showStatus("Specification mode cleared");
+	}
+
+	private async beginSpecExecution(): Promise<void> {
+		if (!specHasPlan(this.specState)) {
+			this.showWarning("No specification plan available to execute");
+			return;
+		}
+		if (this.specState.phase === "executing") {
+			this.showStatus(`Already executing approved spec${this.specState.title ? `: ${this.specState.title}` : ""}`);
+			return;
+		}
+
+		const artifactPath =
+			this.specState.artifactPath ?? (await saveSpecArtifact(this.sessionManager.getCwd(), this.specState.plan));
+		const approvedAt = new Date().toISOString();
+		await this.restoreSessionAfterSpec(this.specState);
+		this.persistSpecState(
+			createSpecState({
+				...this.specState,
+				maskEnabled: true,
+				phase: "executing",
+				artifactPath,
+				approvedAt,
+			}),
+		);
+
+		await this.session.sendCustomMessage(
+			{
+				customType: "spec-approved",
+				content: `Approved specification: ${this.specState.plan.title}\nSaved to ${artifactPath}`,
+				display: true,
+			},
+			{ triggerTurn: false },
+		);
+		this.session.removeCustomMessages(["spec-mode-context", "mission-mode-context"]);
+		await this.session.sendCustomMessage(
+			{
+				customType: "spec-mode-context",
+				content: buildSpecExecutionContext(this.specState.plan, artifactPath),
+				display: false,
+			},
+			{ triggerTurn: true },
+		);
+	}
+
+	private async maybeHandleSpecExecutionCompletion(
+		event: Extract<AgentSessionEvent, { type: "agent_end" }>,
+	): Promise<void> {
+		const state = this.specState;
+		if (!state || state.phase !== "executing") {
+			return;
+		}
+
+		const lastAssistant = this.getLastAssistantMessage(event.messages);
+		if (lastAssistant?.stopReason === "stop") {
+			await this.finalizeSpecExecutionState(
+				state,
+				createInactiveSpecState(state),
+				"Specification execution completed. Specification mode cleared.",
+			);
+			return;
+		}
+
+		if (lastAssistant?.stopReason === "error" && this.session.isRetrying) {
+			return;
+		}
+
+		await this.finalizeSpecExecutionState(
+			state,
+			this.createInterruptedSpecState(state),
+			"Specification execution stopped before completion. Approved plan kept for review.",
+		);
+	}
+
+	private async maybeHandleSpecRetryFailure(
+		event: Extract<AgentSessionEvent, { type: "auto_retry_end" }>,
+	): Promise<void> {
+		const state = this.specState;
+		if (!state || state.phase !== "executing" || event.success) {
+			return;
+		}
+
+		await this.finalizeSpecExecutionState(
+			state,
+			this.createInterruptedSpecState(state),
+			"Specification execution stopped before completion. Approved plan kept for review.",
+		);
+	}
+
+	private async maybeHandleSpecPlan(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
+		if (this.specState?.phase !== "planning") {
+			return;
+		}
+
+		const autoContinuationActive = this.specAutoContinuationActive;
+		this.specAutoContinuationActive = false;
+		const priorPlanningTurns = this.specState.planningTurnCount ?? 0;
+		const mergedEvidence = mergeSpecPlanningEvidence(
+			this.specState.planningEvidence,
+			collectSpecPlanningEvidence(event.messages),
+		);
+		const nextPlanningTurnCount = priorPlanningTurns + 1;
+		const lastAssistant = this.getLastAssistantMessage(event.messages);
+		const plan = lastAssistant ? parseSpecPlan(this.getAssistantText(lastAssistant)) : undefined;
+		if (!plan || this.specState.plan?.markdown === plan.markdown) {
+			this.persistSpecState(
+				createSpecState({
+					...this.specState,
+					phase: "planning",
+					planningTurnCount: nextPlanningTurnCount,
+					planningEvidence: mergedEvidence,
+				}),
+			);
+			return;
+		}
+
+		const gate = evaluateSpecPlanningGate({
+			priorPlanningTurns,
+			evidence: mergedEvidence,
+			requestText: this.specState.request,
+			planMarkdown: plan.markdown,
+		});
+		if (!gate.ready) {
+			this.persistSpecState(
+				createSpecState({
+					...this.specState,
+					phase: "planning",
+					planningTurnCount: nextPlanningTurnCount,
+					planningEvidence: mergedEvidence,
+				}),
+			);
+			this.clearStreamingSpecPlan();
+			if (!autoContinuationActive && shouldAutoContinueSpecPlanning(gate.missing)) {
+				await this.triggerSpecPlanningAutoContinuationTurn(gate.missing);
+				return;
+			}
+			this.showSpecPlanningBlockedFeedback(gate.missing);
+			this.showStatus(this.formatSpecPlanningGateStatus(gate.missing));
+			return;
+		}
+
+		this.persistSpecState(
+			createSpecState({
+				...this.specState,
+				phase: "approved",
+				title: plan.title,
+				plan,
+				planningTurnCount: nextPlanningTurnCount,
+				planningEvidence: mergedEvidence,
+			}),
+		);
+
+		await this.session.sendCustomMessage(
+			{
+				customType: "spec-plan",
+				content: plan.markdown,
+				display: true,
+			},
+			{ triggerTurn: false },
+		);
+
+		await this.showSpecSelector();
+	}
+
+	private async setSpecModel(modelReference: string): Promise<void> {
+		const trimmed = modelReference.trim();
+		const previous = this.specState;
+		if (!trimmed || trimmed === "clear") {
+			this.persistSpecState(
+				createSpecState({
+					...previous,
+					planningModel: undefined,
+					phase: previous?.phase ?? "inactive",
+				}),
+			);
+			if (previous?.phase === "planning") {
+				await this.restoreSessionAfterSpec(previous);
+				this.session.setActiveToolsByName(getSpecPlanningToolNames());
+			}
+			this.showStatus("Cleared specification planning model");
+			return;
+		}
+
+		const resolved = resolveCliModel({ cliModel: trimmed, modelRegistry: this.session.modelRegistry });
+		if (!resolved.model) {
+			this.showError(resolved.error ?? `Model "${trimmed}" not found`);
+			return;
+		}
+
+		this.persistSpecState(
+			createSpecState({
+				...previous,
+				phase: previous?.phase ?? "inactive",
+				planningModel: {
+					modelArg: `${resolved.model.provider}/${resolved.model.id}`,
+					provider: resolved.model.provider,
+					modelId: resolved.model.id,
+					thinkingLevel: resolved.thinkingLevel,
+				},
+			}),
+		);
+		if (this.specState?.phase === "planning") {
+			await this.applySpecStateToSession(this.specState);
+		}
+		this.showStatus(`Spec planning model: ${resolved.model.name || resolved.model.id}`);
+	}
+
+	private async handleAgentsCommand(): Promise<void> {
+		const cwd = this.sessionManager.getCwd();
+		const discovery = discoverAgents(cwd, "both");
+		const visibleAgents = discovery.agents.filter((agent) => !agent.hidden);
+
+		const ACTION_CREATE = "+ Create new agent";
+		const ACTION_IMPORT = "⇩ Import from Claude Code";
+		const ACTION_RELOAD = "↺ Reload";
+
+		const agentLabels = visibleAgents.map((agent) => this.formatAgentOption(agent));
+		const menuOptions = [ACTION_CREATE, ACTION_IMPORT, ACTION_RELOAD, ...agentLabels];
+
+		const title = `Agents (${visibleAgents.length} available)`;
+		const selected = await this.showExtensionSelector(title, menuOptions);
+		if (!selected) return;
+
+		if (selected === ACTION_CREATE) {
+			await this.handleAgentCreate(cwd, discovery.projectAgentsDir);
+			return;
+		}
+		if (selected === ACTION_IMPORT) {
+			await this.handleAgentImport(cwd);
+			return;
+		}
+		if (selected === ACTION_RELOAD) {
+			const reloaded = discoverAgents(cwd, "both");
+			const count = reloaded.agents.filter((a) => !a.hidden).length;
+			this.showStatus(`Agents reloaded. ${count} agent${count !== 1 ? "s" : ""} available.`);
+			return;
+		}
+
+		const agent = visibleAgents.find((item) => this.formatAgentOption(item) === selected);
+		if (!agent) return;
+		await this.handleAgentActions(agent, cwd);
+	}
+
+	private async handleAgentActions(agent: AgentConfig, _cwd: string): Promise<void> {
+		const ACTION_VIEW = "View details";
+		const ACTION_EDIT = "Edit (open in $EDITOR)";
+		const ACTION_DELETE = "Delete";
+
+		const canEdit = agent.source !== "built-in" && !!agent.filePath;
+		const actions = [ACTION_VIEW, ...(canEdit ? [ACTION_EDIT, ACTION_DELETE] : [])];
+		const action = await this.showExtensionSelector(`${agent.name} — actions`, actions);
+		if (!action) return;
+
+		if (action === ACTION_VIEW) {
+			const toolsSummary = agent.tools?.length
+				? `Tools: ${agent.tools.join(", ")}`
+				: "Tools: inherit from parent session";
+			const details = [
+				`Agent: ${agent.name}`,
+				`Source: ${agent.source}`,
+				`Location: ${agent.filePath ?? "built-in"}`,
+				`Mode: ${agent.mode ?? "subagent"}`,
+				agent.specRole ? `Role: ${agent.specRole}` : undefined,
+				agent.readOnly ? "Read-only: yes" : undefined,
+				agent.model ? `Model: ${agent.model}` : "Model: inherit",
+				agent.reasoningEffort ? `Thinking: ${agent.reasoningEffort}` : undefined,
+				toolsSummary,
+				`Description: ${agent.description}`,
+			]
+				.filter((line): line is string => Boolean(line))
+				.join("\n");
+			this.showStatus(details);
+			return;
+		}
+
+		if (action === ACTION_EDIT && agent.filePath) {
+			const editorCmd = process.env.VISUAL ?? process.env.EDITOR;
+			if (!editorCmd) {
+				this.showWarning("No editor configured. Set $VISUAL or $EDITOR environment variable.");
+				return;
+			}
+			this.ui.stop();
+			const [editor, ...editorArgs] = editorCmd.split(" ");
+			spawnSync(editor, [...editorArgs, agent.filePath], {
+				stdio: "inherit",
+				shell: process.platform === "win32",
+			});
+			this.ui.start();
+			this.ui.requestRender();
+			this.showStatus(`Saved: ${agent.filePath}`);
+			return;
+		}
+
+		if (action === ACTION_DELETE && agent.filePath) {
+			const confirm = await this.showExtensionSelector(`Delete agent "${agent.name}"?`, [
+				"No, keep it",
+				"Yes, delete",
+			]);
+			if (confirm !== "Yes, delete") return;
+			try {
+				fs.unlinkSync(agent.filePath);
+				this.showStatus(`Agent "${agent.name}" deleted.`);
+			} catch (err) {
+				this.showWarning(`Failed to delete agent: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+	}
+
+	private async handleAgentCreate(cwd: string, projectAgentsDir: string | null): Promise<void> {
+		const userDir = getUserAgentsDir();
+		const projDir = projectAgentsDir ?? getDefaultProjectAgentsDir(cwd);
+
+		// Step 1: location
+		const locUser = `User  (~/.hirocode/agent/agents/)`;
+		const locProj = `Project  (.hirocode/agents/)`;
+		const locChoice = await this.showExtensionSelector("Create agent — choose location", [locUser, locProj]);
+		if (!locChoice) return;
+		const targetDir = locChoice === locProj ? projDir : userDir;
+
+		// Step 2: model — dynamically pulled from the registry (same source as /model)
+		const MODEL_INHERIT = "inherit  (use parent session model)";
+		this.session.modelRegistry.refresh();
+		const availableModels = this.session.modelRegistry.getAvailable();
+		const modelOptions = [MODEL_INHERIT, ...availableModels.map((m) => `${m.provider}/${m.id}`)];
+		const modelChoice = await this.showExtensionSelector(
+			`Create agent — choose model  (${availableModels.length} available)`,
+			modelOptions,
+		);
+		if (!modelChoice) return;
+		const modelValue = modelChoice === MODEL_INHERIT ? "inherit" : modelChoice;
+
+		// Step 3: tools
+		const TOOLS_ALL = "all tools  (no restriction)";
+		const toolsChoice = await this.showExtensionSelector("Create agent — choose tools", [
+			TOOLS_ALL,
+			"read-only  (read, grep, find, ls)",
+			"edit       (edit, write)",
+			"execute    (bash)",
+			"web        (webfetch, websearch)",
+			"custom     (edit file manually)",
+		]);
+		if (!toolsChoice) return;
+
+		const toolsMap: Record<string, string | undefined> = {
+			[TOOLS_ALL]: undefined,
+			"read-only  (read, grep, find, ls)": "read-only",
+			"edit       (edit, write)": "edit",
+			"execute    (bash)": "execute",
+			"web        (webfetch, websearch)": "web",
+			"custom     (edit file manually)": undefined,
+		};
+		const toolsValue = toolsMap[toolsChoice];
+
+		// Build template frontmatter
+		const toolsLine = toolsValue ? `tools: ${toolsValue}` : "# tools: read-only  # uncomment and adjust as needed";
+		const template = [
+			"---",
+			"name: my-agent  # change to a unique lowercase name (letters, digits, hyphens)",
+			"description: A brief description of what this agent does.",
+			`model: ${modelValue}`,
+			toolsLine,
+			"---",
+			"",
+			"You are a specialized agent. Describe your role and behavior here.",
+			"",
+			"When done:",
+			"1. State what you completed.",
+			"2. List any files changed.",
+			"3. Note follow-up work or risks.",
+		].join("\n");
+
+		// Write template and open in editor
+		fs.mkdirSync(targetDir, { recursive: true });
+		const tmpPath = path.join(targetDir, `new-agent-${Date.now()}.md`);
+		fs.writeFileSync(tmpPath, template, { encoding: "utf-8" });
+
+		const editorCmd = process.env.VISUAL ?? process.env.EDITOR;
+		if (!editorCmd) {
+			this.showStatus(`Template created at: ${tmpPath}\nSet $VISUAL or $EDITOR to edit it interactively.`);
+			return;
+		}
+
+		this.ui.stop();
+		const [editor, ...editorArgs] = editorCmd.split(" ");
+		const result = spawnSync(editor, [...editorArgs, tmpPath], {
+			stdio: "inherit",
+			shell: process.platform === "win32",
+		});
+		this.ui.start();
+		this.ui.requestRender();
+
+		if (result.status !== 0) {
+			this.showWarning(`Editor exited with error. Template saved at: ${tmpPath}`);
+			return;
+		}
+
+		// Validate the saved file
+		try {
+			const saved = fs.readFileSync(tmpPath, "utf-8");
+			// Try to detect the name from frontmatter for the rename
+			const nameMatch = saved.match(/^name:\s*([a-z0-9][a-z0-9_-]*)/m);
+			const agentName = nameMatch?.[1] ?? null;
+			if (agentName && agentName !== "my-agent") {
+				const finalPath = path.join(targetDir, `${agentName}.md`);
+				fs.renameSync(tmpPath, finalPath);
+				this.showStatus(`Agent "${agentName}" created at: ${finalPath}`);
+			} else {
+				this.showStatus(`Agent template saved at: ${tmpPath}\nRename the file to match the 'name' field.`);
+			}
+		} catch (err) {
+			this.showWarning(`Could not finalize agent file: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	private async handleAgentImport(cwd: string): Promise<void> {
+		const claudeAgents = scanClaudeAgents(cwd);
+		if (claudeAgents.length === 0) {
+			this.showStatus("No Claude Code agents found in ~/.claude/agents/ or .claude/agents/");
+			return;
+		}
+
+		const userDir = getUserAgentsDir();
+		const agentOptions = claudeAgents.map((a) => {
+			const exists = agentExistsInDir(a.name, userDir);
+			const warning = a.invalidTools.length > 0 ? ` ⚠ unmapped: ${a.invalidTools.join(",")}` : "";
+			return `${exists ? "◦" : "●"} ${a.name}${exists ? " (already exists)" : ""}${warning}`;
+		});
+
+		const selected = await this.showExtensionSelector(
+			`Import from Claude Code  (${claudeAgents.length} found — ● new, ◦ exists)`,
+			agentOptions,
+		);
+		if (!selected) return;
+
+		const idx = agentOptions.indexOf(selected);
+		if (idx < 0 || idx >= claudeAgents.length) return;
+		const agent = claudeAgents[idx];
+
+		// Confirm if agent already exists
+		if (agentExistsInDir(agent.name, userDir)) {
+			const confirm = await this.showExtensionSelector(`Agent "${agent.name}" already exists. Overwrite?`, [
+				"No, keep existing",
+				"Yes, overwrite",
+			]);
+			if (confirm !== "Yes, overwrite") return;
+		}
+
+		const { imported, failed } = importClaudeAgents([agent], userDir);
+		if (imported.length > 0) {
+			const warnings =
+				agent.invalidTools.length > 0 ? `\nUnmapped tools skipped: ${agent.invalidTools.join(", ")}` : "";
+			this.showStatus(`Imported "${imported[0]}" → ${userDir}/${imported[0]}.md${warnings}`);
+		} else if (failed.length > 0) {
+			this.showWarning(`Import failed: ${failed[0].error}`);
+		}
+	}
+
+	private formatAgentOption(agent: AgentConfig): string {
+		const source = agent.source === "built-in" ? "built-in" : agent.source === "project" ? "project" : "user";
+		const model = agent.model ?? "inherit";
+		const toolsSummary = agent.tools?.length
+			? `${agent.tools.length} tool${agent.tools.length !== 1 ? "s" : ""}`
+			: "all tools";
+		const desc = agent.description.length > 50 ? `${agent.description.slice(0, 50)}...` : agent.description;
+		return `${agent.name}  [${source}]  ${model}  ${toolsSummary}  — ${desc}`;
+	}
+
+	private clearStreamingSpecPlan(): void {
+		if (!this.streamingSpecPlanComponent) {
+			return;
+		}
+		this.chatContainer.removeChild(this.streamingSpecPlanComponent);
+		this.streamingSpecPlanComponent = undefined;
+	}
+
+	private getCustomMessageRenderer(customType: string) {
+		return this.session.extensionRunner?.getMessageRenderer(customType) ?? getBuiltinMessageRenderer(customType);
+	}
+
+	private buildVisibleAssistantMessage(message: AssistantMessage): AssistantMessage {
+		const isMissionPlanning = Boolean(this.missionState && this.missionState.status === "planning");
+		const isSpecPlanning = this.specState?.phase === "planning";
+
+		if (!isMissionPlanning && !isSpecPlanning) {
+			return message;
+		}
+
+		const content = message.content.map((part) => {
+			if (part.type !== "text") {
+				return part;
+			}
+			if (isSpecPlanning) {
+				const state = extractProposedPlanDisplayState(part.text);
+				return { ...part, text: state.visibleText };
+			}
+			// Mission planning: strip <mission_plan> from streaming display
+			const state = extractMissionPlanDisplayState(part.text);
+			return { ...part, text: state.visibleText };
+		});
+
+		return { ...message, content };
+	}
+
+	private async startMissionPlanning(goal: string): Promise<void> {
+		if (this.specState?.phase && this.specState.phase !== "inactive") {
+			await this.clearSpecMode();
+		}
+		const existing =
+			this.missionState?.status === "planning"
+				? this.missionState
+				: createMissionRecord(goal, this.sessionManager.getCwd());
+		const mission = {
+			...existing,
+			goal,
+			title: existing.title || goal,
+			status: "planning" as const,
+			updatedAt: new Date().toISOString(),
+		};
+		await this.persistMissionState(mission);
+		await appendMissionEvent(mission, {
+			type: "mission_created",
+			missionId: mission.id,
+			goal,
+			createdAt: mission.createdAt,
+		});
+		this.editor.addToHistory?.(`/mission ${goal}`);
+		this.editor.setText("");
+		this.syncInteractiveAskAvailability();
+		await this.withSpecContextPrompt(goal);
+	}
+
+	private async maybeHandleMissionPlan(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
+		if (!this.missionState || this.missionState.status !== "planning") {
+			return;
+		}
+		const lastAssistant = [...event.messages]
+			.reverse()
+			.find((message): message is AssistantMessage => message.role === "assistant");
+		if (!lastAssistant) {
+			return;
+		}
+		const plan = parseMissionPlan(this.missionState.goal, this.getAssistantText(lastAssistant));
+		if (!plan || this.missionState.plan?.markdown === plan.markdown) {
+			return;
+		}
+
+		const scheduled = buildMissionSchedule(plan, 2);
+		const nextMission: MissionRecord = {
+			...this.missionState,
+			title: plan.title,
+			plan,
+			schedule: scheduled,
+			updatedAt: new Date().toISOString(),
+		};
+		const persisted = await saveMissionPlan(nextMission, plan);
+		persisted.schedule = scheduled;
+		await saveMission(persisted);
+		await this.persistMissionState(persisted);
+		await appendMissionEvent(persisted, {
+			type: "mission_plan_saved",
+			missionId: persisted.id,
+			title: plan.title,
+			createdAt: new Date().toISOString(),
+		});
+		const budgetLines = [
+			`Mission plan ready: ${plan.title}`,
+			`Features: ${plan.features.length}  Milestones: ${plan.milestones.length}`,
+			`Estimated runs: ~${plan.budgetEstimate.estimatedRuns} (floor: ${plan.budgetEstimate.floorRuns})`,
+			plan.budgetEstimate.reasoning,
+		];
+		await this.session.sendCustomMessage(
+			{ customType: "mission-plan", content: persisted.plan!.markdown, display: true },
+			{ triggerTurn: false },
+		);
+		await this.session.sendCustomMessage(
+			{
+				customType: "mission-plan-ready",
+				content: budgetLines.join("\n"),
+				display: true,
+			},
+			{ triggerTurn: false },
+		);
+		const choice = await this.showExtensionCustom<MissionPlanOverviewChoice | undefined>(
+			(tui, _theme, _keybindings, done) =>
+				new MissionPlanOverviewComponent({
+					plan: persisted.plan!,
+					tui,
+					onSelect: (c) => done(c),
+					onCancel: () => done(undefined),
+				}),
+			{ overlay: true, overlayOptions: { width: "100%" } },
+		);
+		if (!choice || choice === "iterate") {
+			return;
+		}
+		if (choice === "clear") {
+			await this.clearMission();
+			return;
+		}
+		await this.startMissionExecution(persisted);
+	}
+
+	private async startMissionExecution(mission: MissionRecord): Promise<void> {
+		this.missionOrchestrator = this.createMissionOrchestrator();
+		const approved = await updateMissionStatus({ ...mission, status: "running" }, "running");
+		await this.persistMissionState(approved);
+		this.showStatus(`Starting mission: ${approved.title}`);
+		void this.missionOrchestrator
+			.start(approved)
+			.then(async (result) => {
+				this.missionState = result;
+				this.syncInteractiveAskAvailability();
+				writeMissionLink(this.sessionManager, result);
+				this.updateMissionWidget();
+				this.missionOrchestrator = undefined;
+				if (result.status === "completed") {
+					this.showStatus(`Mission completed: ${result.title}`);
+				} else if (result.status === "aborted") {
+					this.showWarning(`Mission aborted: ${result.title}`);
+				}
+			})
+			.catch((error: unknown) => {
+				this.missionOrchestrator = undefined;
+				this.showError(error instanceof Error ? error.message : String(error));
+			});
+	}
+
+	private async clearMission(): Promise<void> {
+		if (this.missionOrchestrator) {
+			this.missionOrchestrator.abort();
+			this.missionOrchestrator = undefined;
+		}
+		this.missionState = undefined;
+		this.missionRuntimeUpdateChain = Promise.resolve();
+		this.syncInteractiveAskAvailability();
+		clearMissionLink(this.sessionManager);
+		this.session.removeCustomMessages(["mission-mode-context", "mission-plan-ready", "mission-plan"]);
+		this.setExtensionWidget("__mission_control__", undefined);
+		this.updateModeBanner();
+		this.showStatus("Mission context cleared");
+	}
+
+	private async openMissionFeatureSession(
+		featureId: string,
+	): Promise<{ kind: "opened" } | { kind: "waiting" | "unavailable"; message: string }> {
+		const navigation = resolveMissionFeatureSessionNavigation(this.missionState, featureId);
+		switch (navigation.kind) {
+			case "session":
+				await this.openChildSession(navigation.sessionFile);
+				return { kind: "opened" };
+			case "waiting":
+			case "unavailable":
+				return { kind: navigation.kind, message: navigation.message };
+		}
+	}
+
+	private async openChildSession(sessionFile: string): Promise<void> {
+		const mode = resolveChildSessionOpenMode({
+			isStreaming: this.session.isStreaming,
+			activeSessionFile: this.activeSessionManager.getSessionFile(),
+			targetSessionFile: sessionFile,
+		});
+		if (mode === "detached") {
+			this.openDetachedSessionView(sessionFile);
+			this.showStatus("Viewing detached child session while the active session keeps running");
+			return;
+		}
+		await this.handleResumeSession(sessionFile);
+	}
+
+	private async handleMissionDelegatedApproval(request: DelegatedTaskApprovalRequest): Promise<{
+		approved: boolean;
+		reason?: string;
+	}> {
+		const approved = await this.showExtensionConfirm(
+			`Mission worker approval\n${request.agent}`,
+			`${request.kind}: ${request.summary}`,
+		);
+		if (approved) {
+			this.showStatus(`Approved: ${request.summary}`);
+			return { approved: true };
+		}
+		this.showWarning(`Rejected: ${request.summary}`);
+		return { approved: false, reason: "Rejected from Mission Control" };
+	}
+
+	private buildRetryFailureContext(mission: MissionRecord): Record<string, string> {
+		const context: Record<string, string> = {};
+		for (const [milestoneId, report] of Object.entries(mission.validationReports)) {
+			if (report.status !== "failed") continue;
+			const lines: string[] = [];
+			for (const check of report.structuredChecks) {
+				if (check.exitCode !== 0) {
+					lines.push(`Command "${check.command}" failed (exit ${check.exitCode}): ${check.output.slice(0, 300)}`);
+				}
+			}
+			if (report.findings.length > 0) {
+				lines.push(`Reviewer findings: ${report.findings.slice(0, 3).join("; ")}`);
+			}
+			const milestone = mission.plan?.milestones.find((m) => m.id === milestoneId);
+			for (const featureId of milestone?.featureIds ?? []) {
+				context[featureId] = lines.join("\n");
+			}
+		}
+		return context;
+	}
+
+	private async retryMission(): Promise<void> {
+		if (!this.missionState) {
+			return;
+		}
+		const failureContext = this.buildRetryFailureContext(this.missionState);
+		const featureRuns: Record<string, MissionFeatureRun> = Object.fromEntries(
+			Object.entries(this.missionState.featureRuns).map(([featureId, run]) => [
+				featureId,
+				run.status === "failed" || run.status === "blocked"
+					? ({
+							...run,
+							status: "pending",
+							lastError: failureContext[featureId] ?? undefined,
+						} as MissionFeatureRun)
+					: run,
+			]),
+		);
+		const workers: Record<string, MissionWorkerState> = Object.fromEntries(
+			Object.entries(this.missionState.workers).map(([featureId, worker]) => [
+				featureId,
+				worker.status === "failed" || worker.status === "aborted"
+					? ({ ...worker, status: "pending" } as MissionWorkerState)
+					: worker,
+			]),
+		);
+		const milestoneStatus = Object.fromEntries(
+			Object.entries(this.missionState.milestoneStatus).map(([milestoneId, status]) => [
+				milestoneId,
+				status === "failed" ? "pending" : status,
+			]),
+		) as MissionRecord["milestoneStatus"];
+		await this.startMissionExecution({
+			...this.missionState,
+			status: "paused",
+			featureRuns,
+			workers,
+			milestoneStatus,
+			pausedReason: undefined,
+		});
+	}
+
+	private async openMissionControl(): Promise<void> {
+		if (!this.missionState) {
+			this.showStatus("No active mission. Use /mission <goal> to start planning.");
+			return;
+		}
+		let selectedFeatureId: string | undefined;
+		let notice: string | undefined;
+		while (this.missionState) {
+			const action = await this.showExtensionCustom<MissionControlAction | undefined>(
+				(_tui, _theme, _keybindings, done) =>
+					new MissionControlComponent({
+						getMission: () => this.missionState,
+						getPendingApprovals: () => this.safetyServices.approval.getPendingRequests().length,
+						selectedFeatureId,
+						notice,
+						onSelect: (selected) => done(selected),
+						onCancel: () => done(undefined),
+					}),
+				{
+					overlay: true,
+					overlayOptions: { width: "78%", maxHeight: "80%", anchor: "center" },
+				},
+			).catch(() => undefined);
+			if (!action) {
+				return;
+			}
+			if (action.type === "open-feature") {
+				const result = await this.openMissionFeatureSession(action.featureId);
+				if (result.kind === "opened") {
+					return;
+				}
+				selectedFeatureId = action.featureId;
+				notice = result.message;
+				continue;
+			}
+			await this.handleMissionControlAction(action);
+			return;
+		}
+	}
+
+	private async handleMissionControlAction(action: MissionControlAction): Promise<void> {
+		if (!this.missionState) {
+			return;
+		}
+		switch (action.type) {
+			case "status":
+				this.showStatus(this.formatMissionControlLines(this.missionState).join("\n"));
+				return;
+			case "toggle-pause":
+				if (this.missionState.status === "running") {
+					this.missionOrchestrator?.pause();
+					this.showStatus("Mission will pause after the current wave.");
+					return;
+				}
+				if (this.missionOrchestrator) {
+					this.missionOrchestrator.resume();
+					this.showStatus("Mission resumed");
+					return;
+				}
+				await this.startMissionExecution(this.missionState);
+				return;
+			case "retry":
+				await this.retryMission();
+				return;
+			case "open-feature":
+				return;
+			case "abort":
+				this.missionOrchestrator?.abort();
+				this.showWarning("Mission abort requested.");
+				return;
+			case "clear":
+				await this.clearMission();
+				return;
+		}
+	}
+
+	private async handleMissionCommand(text: string): Promise<void> {
+		const rest = text.slice(8).trim();
+		if (!rest) {
+			await this.openMissionControl();
+			return;
+		}
+		if (rest === "status") {
+			await this.openMissionControl();
+			return;
+		}
+		if (rest === "pause") {
+			this.missionOrchestrator?.pause();
+			this.showStatus("Mission will pause after the current wave.");
+			return;
+		}
+		if (rest === "resume") {
+			if (this.missionState) {
+				await this.startMissionExecution(this.missionState);
+			}
+			return;
+		}
+		if (rest === "abort") {
+			this.missionOrchestrator?.abort();
+			this.showWarning("Mission abort requested.");
+			return;
+		}
+		if (rest === "retry") {
+			await this.retryMission();
+			return;
+		}
+		if (rest.startsWith("open ")) {
+			await this.openMissionFeatureSession(rest.slice(5).trim());
+			return;
+		}
+		if (rest.startsWith("replan ")) {
+			if (!this.missionState) {
+				this.showWarning("No mission to re-plan.");
+				return;
+			}
+			this.missionState = await updateMissionStatus(this.missionState, "planning");
+			await this.persistMissionState(this.missionState);
+			await this.withSpecContextPrompt(`Re-plan the mission. Additional direction: ${rest.slice(7).trim()}`);
+			return;
+		}
+		await this.startMissionPlanning(rest);
+	}
+
+	private async handleMissionsCommand(): Promise<void> {
+		const missions = listMissions(this.sessionManager.getCwd());
+		const selected = await this.showExtensionCustom<MissionRecord | undefined>(
+			(_tui, _theme, _keybindings, done) =>
+				new MissionListComponent({
+					getMissions: () => missions,
+					onSelect: (mission) => done(mission),
+					onCancel: () => done(undefined),
+				}),
+			{
+				overlay: true,
+				overlayOptions: { width: "78%", maxHeight: "80%", anchor: "center" },
+			},
+		);
+		if (!selected) {
+			return;
+		}
+		await this.persistMissionState(selected);
+		await this.openMissionControl();
+	}
+
+	private async handleSpecCommand(text: string): Promise<void> {
+		const rest = text.slice(5).trim();
+		if (!rest) {
+			if (this.specState?.phase && this.specState.phase !== "inactive" && specHasPlan(this.specState)) {
+				await this.showSpecSelector();
+				return;
+			}
+			await this.enterSpecMode();
+			return;
+		}
+
+		if (rest === "status") {
+			if (specHasPlan(this.specState)) {
+				await this.showSpecSelector();
+			} else {
+				this.handleSpecStatus();
+			}
+			return;
+		}
+
+		if (rest === "approve") {
+			await this.beginSpecExecution();
+			return;
+		}
+
+		if (rest === "clear") {
+			await this.clearSpecMode();
+			return;
+		}
+
+		if (rest.startsWith("model ")) {
+			await this.setSpecModel(rest.slice(6));
+			return;
+		}
+
+		await this.enterSpecMode(rest);
 	}
 
 	/**
@@ -2179,6 +4223,10 @@ export class InteractiveMode {
 		// Global debug handler on TUI (works regardless of focus)
 		this.ui.onDebug = () => this.handleDebugCommand();
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
+		this.defaultEditor.onAction("app.spec.toggle", () => {
+			void this.toggleSpecMask();
+		});
+		this.defaultEditor.onAction("app.autonomy.cycle", () => this.cycleAutonomyMode());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.editor.external", () => this.openExternalEditor());
@@ -2343,6 +4391,42 @@ export class InteractiveMode {
 				await this.handleSubagentsCommand(text);
 				return;
 			}
+			if (text === "/mission" || text.startsWith("/mission ")) {
+				this.editor.setText("");
+				await this.handleMissionCommand(text);
+				return;
+			}
+			if (text === "/enter-mission" || text.startsWith("/enter-mission ")) {
+				const goal = text.slice("/enter-mission".length).trim();
+				this.editor.setText("");
+				await this.handleMissionCommand(goal ? `/mission ${goal}` : "/mission");
+				return;
+			}
+			if (text === "/missions") {
+				this.editor.setText("");
+				await this.handleMissionsCommand();
+				return;
+			}
+			if (text === "/agents") {
+				this.editor.setText("");
+				await this.handleAgentsCommand();
+				return;
+			}
+			if (text === "/spec" || text.startsWith("/spec ")) {
+				this.editor.setText("");
+				await this.handleSpecCommand(text);
+				return;
+			}
+			if (text === "/approvals") {
+				this.editor.setText("");
+				await this.handleApprovalsCommand();
+				return;
+			}
+			if (text === "/mcp") {
+				this.editor.setText("");
+				await this.handleMcpCommand();
+				return;
+			}
 			if (text === "/quit") {
 				this.editor.setText("");
 				await this.shutdown();
@@ -2391,7 +4475,7 @@ export class InteractiveMode {
 			if (this.session.isStreaming) {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
-				await this.session.prompt(text, { streamingBehavior: "steer" });
+				await this.withSpecContextPrompt(text, { streamingBehavior: "steer" });
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 				return;
@@ -2464,11 +4548,15 @@ export class InteractiveMode {
 					}
 					this.pendingWorkingMessage = undefined;
 				}
+				this.startWorkingSessionTimer();
 				this.ui.requestRender();
 				break;
 
 			case "message_start":
 				if (event.message.role === "custom") {
+					if (event.message.customType === "spec-plan") {
+						this.clearStreamingSpecPlan();
+					}
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
 				} else if (event.message.role === "user") {
@@ -2476,12 +4564,13 @@ export class InteractiveMode {
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
+					this.clearStreamingSpecPlan();
 					this.streamingComponent = new AssistantMessageComponent(
 						undefined,
 						this.hideThinkingBlock,
 						this.getMarkdownThemeWithSettings(),
 					);
-					this.streamingMessage = event.message;
+					this.streamingMessage = this.buildVisibleAssistantMessage(event.message);
 					this.chatContainer.addChild(this.streamingComponent);
 					this.streamingComponent.updateContent(this.streamingMessage);
 					this.ui.requestRender();
@@ -2490,7 +4579,7 @@ export class InteractiveMode {
 
 			case "message_update":
 				if (this.streamingComponent && event.message.role === "assistant") {
-					this.streamingMessage = event.message;
+					this.streamingMessage = this.buildVisibleAssistantMessage(event.message);
 					this.streamingComponent.updateContent(this.streamingMessage);
 
 					for (const content of this.streamingMessage.content) {
@@ -2524,7 +4613,7 @@ export class InteractiveMode {
 			case "message_end":
 				if (event.message.role === "user") break;
 				if (this.streamingComponent && event.message.role === "assistant") {
-					this.streamingMessage = event.message;
+					this.streamingMessage = this.buildVisibleAssistantMessage(event.message);
 					let errorMessage: string | undefined;
 					if (this.streamingMessage.stopReason === "aborted") {
 						const retryAttempt = this.session.retryAttempt;
@@ -2555,6 +4644,9 @@ export class InteractiveMode {
 					}
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
+					if (event.message.stopReason === "aborted" || event.message.stopReason === "error") {
+						this.clearStreamingSpecPlan();
+					}
 					this.footer.invalidate();
 				}
 				this.ui.requestRender();
@@ -2602,6 +4694,7 @@ export class InteractiveMode {
 			}
 
 			case "agent_end":
+				this.stopWorkingSessionTimer();
 				if (this.loadingAnimation) {
 					this.loadingAnimation.stop();
 					this.loadingAnimation = undefined;
@@ -2614,6 +4707,9 @@ export class InteractiveMode {
 				}
 				this.pendingTools.clear();
 				this.clearDetachedActiveSessionState();
+				await this.maybeHandleMissionPlan(event);
+				await this.maybeHandleSpecExecutionCompletion(event);
+				await this.maybeHandleSpecPlan(event);
 
 				await this.checkShutdownRequested();
 
@@ -2719,6 +4815,7 @@ export class InteractiveMode {
 				if (!event.success) {
 					this.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
 				}
+				await this.maybeHandleSpecRetryFailure(event);
 				this.ui.requestRender();
 				break;
 			}
@@ -2779,7 +4876,7 @@ export class InteractiveMode {
 			}
 			case "custom": {
 				if (message.display) {
-					const renderer = this.session.extensionRunner?.getMessageRenderer(message.customType);
+					const renderer = this.getCustomMessageRenderer(message.customType);
 					const component = new CustomMessageComponent(message, renderer, this.getMarkdownThemeWithSettings());
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
@@ -3069,7 +5166,7 @@ export class InteractiveMode {
 		if (this.session.isStreaming) {
 			this.editor.addToHistory?.(text);
 			this.editor.setText("");
-			await this.session.prompt(text, { streamingBehavior: "followUp" });
+			await this.withSpecContextPrompt(text, { streamingBehavior: "followUp" });
 			this.updatePendingMessagesDisplay();
 			this.ui.requestRender();
 		}
@@ -3091,6 +5188,8 @@ export class InteractiveMode {
 	private updateEditorBorderColor(): void {
 		if (this.isBashMode) {
 			this.editor.borderColor = theme.getBashModeBorderColor();
+		} else if (this.isSpecMaskEnabled()) {
+			this.editor.borderColor = (text: string) => theme.fg(this.getSpecThemeColor(), text);
 		} else {
 			const level = this.session.thinkingLevel || "off";
 			this.editor.borderColor = theme.getThinkingBorderColor(level);
@@ -3385,10 +5484,10 @@ export class InteractiveMode {
 				for (const message of queuedMessages) {
 					if (this.isExtensionCommand(message.text)) {
 						await this.session.prompt(message.text);
-					} else if (message.mode === "followUp") {
-						await this.session.followUp(message.text);
 					} else {
-						await this.session.steer(message.text);
+						await this.withSpecContextPrompt(message.text, {
+							streamingBehavior: message.mode === "followUp" ? "followUp" : "steer",
+						});
 					}
 				}
 				this.updatePendingMessagesDisplay();
@@ -3415,7 +5514,7 @@ export class InteractiveMode {
 			}
 
 			// Send first prompt (starts streaming)
-			const promptPromise = this.session.prompt(firstPrompt.text).catch((error) => {
+			const promptPromise = this.withSpecContextPrompt(firstPrompt.text).catch((error) => {
 				restoreQueue(error);
 			});
 
@@ -3423,10 +5522,10 @@ export class InteractiveMode {
 			for (const message of rest) {
 				if (this.isExtensionCommand(message.text)) {
 					await this.session.prompt(message.text);
-				} else if (message.mode === "followUp") {
-					await this.session.followUp(message.text);
 				} else {
-					await this.session.steer(message.text);
+					await this.withSpecContextPrompt(message.text, {
+						streamingBehavior: message.mode === "followUp" ? "followUp" : "steer",
+					});
 				}
 			}
 			this.updatePendingMessagesDisplay();
@@ -3471,6 +5570,10 @@ export class InteractiveMode {
 			const selector = new SettingsSelectorComponent(
 				{
 					autoCompact: this.session.autoCompactionEnabled,
+					interactiveAutonomyPreset: this.getInteractiveAutonomyPreset(),
+					approvalPolicy: this.settingsManager.getApprovalPolicy(),
+					sandboxAdapter: this.settingsManager.getSandboxPolicy().adapter ?? "local",
+					sandboxEnabled: this.settingsManager.getSandboxPolicy().enabled ?? false,
 					showImages: this.settingsManager.getShowImages(),
 					autoResizeImages: this.settingsManager.getImageAutoResize(),
 					blockImages: this.settingsManager.getBlockImages(),
@@ -3496,6 +5599,32 @@ export class InteractiveMode {
 					onAutoCompactChange: (enabled) => {
 						this.session.setAutoCompactionEnabled(enabled);
 						this.footer.setAutoCompactEnabled(enabled);
+					},
+					onInteractiveAutonomyPresetChange: (preset) => {
+						const next = this.setPersistentInteractiveAutonomyPreset(preset);
+						selector.getSettingsList().updateValue("auto-run", preset);
+						selector.getSettingsList().updateValue("approval-policy", next.approvalPolicy);
+						this.updateModeBanner();
+						this.ui.requestRender();
+					},
+					onApprovalPolicyChange: (policy) => {
+						this.settingsManager.setApprovalPolicy(policy);
+						selector
+							.getSettingsList()
+							.updateValue(
+								"auto-run",
+								deriveInteractiveAutonomyPreset(policy, this.settingsManager.getAutonomyMode()),
+							);
+						this.updateModeBanner();
+						this.ui.requestRender();
+					},
+					onSandboxEnabledChange: (enabled) => {
+						const current = this.settingsManager.getSandboxPolicy();
+						this.settingsManager.setSandboxPolicy({ ...current, enabled });
+					},
+					onSandboxAdapterChange: (adapter) => {
+						const current = this.settingsManager.getSandboxPolicy();
+						this.settingsManager.setSandboxPolicy({ ...current, adapter });
 					},
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
@@ -3533,6 +5662,7 @@ export class InteractiveMode {
 					onThemeChange: (themeName) => {
 						const result = setTheme(themeName, true);
 						this.settingsManager.setTheme(themeName);
+						this.updateModeBanner();
 						this.ui.invalidate();
 						if (!result.success) {
 							this.showError(`Failed to load theme "${themeName}": ${result.error}\nFell back to dark theme.`);
@@ -3541,6 +5671,7 @@ export class InteractiveMode {
 					onThemePreview: (themeName) => {
 						const result = setTheme(themeName, true);
 						if (result.success) {
+							this.updateModeBanner();
 							this.ui.invalidate();
 							this.ui.requestRender();
 						}
@@ -4038,18 +6169,7 @@ export class InteractiveMode {
 			return;
 		}
 
-		const activeSessionFile = this.activeSessionManager.getSessionFile();
-		if (
-			this.session.isStreaming &&
-			activeSessionFile &&
-			selectedSession.reference.sessionFile !== activeSessionFile
-		) {
-			this.openDetachedSessionView(selectedSession.reference.sessionFile);
-			this.showStatus("Viewing detached child session while the active session keeps running");
-			return;
-		}
-
-		await this.handleResumeSession(selectedSession.reference.sessionFile);
+		await this.openChildSession(selectedSession.reference.sessionFile);
 	}
 
 	private showSessionSelector(): void {
@@ -4088,8 +6208,12 @@ export class InteractiveMode {
 	}
 
 	private async handleResumeSession(sessionPath: string): Promise<void> {
+		this.specAutoContinuationActive = false;
 		this.stopDetachedSessionView();
 		this.clearDetachedActiveSessionState();
+		this.missionOrchestrator?.abort();
+		this.missionOrchestrator = undefined;
+		await this.restoreSessionAfterSpec(this.specState);
 
 		// Stop loading animation
 		if (this.loadingAnimation) {
@@ -4107,6 +6231,9 @@ export class InteractiveMode {
 
 		// Switch session via AgentSession (emits extension session events)
 		await this.session.switchSession(sessionPath);
+		this.resetWorkingSessionTimer();
+		await this.reloadSpecStateFromSession({ restoreFallback: true });
+		this.reloadMissionStateFromSession();
 
 		// Clear and re-render the chat
 		this.chatContainer.clear();
@@ -4309,6 +6436,9 @@ export class InteractiveMode {
 			this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 			this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 			this.setupAutocomplete(this.fdPath);
+			this.reloadMissionStateFromSession();
+			await this.reloadSpecStateFromSession();
+			this.updateModeBanner();
 			const runner = this.session.extensionRunner;
 			if (runner) {
 				this.setupExtensionShortcuts(runner);
@@ -4386,6 +6516,8 @@ export class InteractiveMode {
 			// Clear and re-render the chat
 			this.chatContainer.clear();
 			this.renderInitialMessages();
+			await this.reloadSpecStateFromSession();
+			this.reloadMissionStateFromSession();
 			this.showStatus(`Session imported from: ${inputPath}`);
 		} catch (error: unknown) {
 			this.showError(`Failed to import session: ${error instanceof Error ? error.message : "Unknown error"}`);
@@ -4595,6 +6727,10 @@ export class InteractiveMode {
 			.join("/");
 	}
 
+	private capitalize(text: string): string {
+		return text.length > 0 ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+	}
+
 	/**
 	 * Get capitalized display string for an app keybinding action.
 	 */
@@ -4644,6 +6780,8 @@ export class InteractiveMode {
 		const cycleThinkingLevel = this.getAppKeyDisplay("app.thinking.cycle");
 		const cycleModelForward = this.getAppKeyDisplay("app.model.cycleForward");
 		const selectModel = this.getAppKeyDisplay("app.model.select");
+		const toggleSpec = this.getAppKeyDisplay("app.spec.toggle");
+		const cycleAutonomy = this.getAppKeyDisplay("app.autonomy.cycle");
 		const expandTools = this.getAppKeyDisplay("app.tools.expand");
 		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
 		const externalEditor = this.getAppKeyDisplay("app.editor.external");
@@ -4688,6 +6826,8 @@ export class InteractiveMode {
 | \`${cycleThinkingLevel}\` | Cycle thinking level |
 | \`${cycleModelForward}\` / \`${cycleModelBackward}\` | Cycle models |
 | \`${selectModel}\` | Open model selector |
+| \`${toggleSpec}\` | Toggle specification mode |
+| \`${cycleAutonomy}\` | Cycle autonomy mode |
 | \`${expandTools}\` | Toggle tool output expansion |
 | \`${toggleThinking}\` | Toggle thinking block visibility |
 | \`${externalEditor}\` | Edit message in external editor |
@@ -4727,6 +6867,10 @@ export class InteractiveMode {
 	}
 
 	private async handleClearCommand(): Promise<void> {
+		this.specAutoContinuationActive = false;
+		this.missionOrchestrator?.abort();
+		this.missionOrchestrator = undefined;
+		await this.restoreSessionAfterSpec(this.specState);
 		// Stop loading animation
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
@@ -4736,6 +6880,9 @@ export class InteractiveMode {
 
 		// New session via session (emits extension session events)
 		await this.session.newSession();
+		this.resetWorkingSessionTimer();
+		await this.reloadSpecStateFromSession({ restoreFallback: true });
+		this.reloadMissionStateFromSession();
 
 		// Clear UI state
 		this.headerContainer.clear();
@@ -4960,7 +7107,13 @@ export class InteractiveMode {
 	}
 
 	stop(): void {
+		this.specAutoContinuationActive = false;
 		this.stopDetachedSessionView();
+		this.missionOrchestrator?.abort();
+		this.missionOrchestrator = undefined;
+		unregisterSessionSafetyServices(this.sessionManager);
+		void this.safetyServices.dispose();
+		this.resetWorkingSessionTimer(false);
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;

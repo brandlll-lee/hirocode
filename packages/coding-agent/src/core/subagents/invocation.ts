@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ThinkingLevel } from "@hirocode/agent-core";
 import { withFileMutationQueue } from "../tools/file-mutation-queue.js";
 import type { ParentModelReference } from "./types.js";
 
@@ -22,14 +23,16 @@ export function formatModelReference(provider: string | undefined, modelId: stri
 
 export function resolveEffectiveSubagentModel(
 	agentModel: string | undefined,
+	agentReasoningEffort: ThinkingLevel | undefined,
 	parentModel: ParentModelReference | undefined,
 	storedModel?: { provider?: string; model?: string },
-): { provider?: string; modelId?: string; modelArg?: string } {
+): { provider?: string; modelId?: string; modelArg?: string; thinkingArg?: ThinkingLevel } {
 	if (storedModel?.model) {
 		return {
 			provider: storedModel.provider,
 			modelId: storedModel.model,
 			modelArg: formatModelReference(storedModel.provider, storedModel.model) ?? storedModel.model,
+			thinkingArg: agentReasoningEffort,
 		};
 	}
 
@@ -42,10 +45,11 @@ export function resolveEffectiveSubagentModel(
 				provider: provider || undefined,
 				modelId: modelId || agentModel,
 				modelArg: agentModel,
+				thinkingArg: agentReasoningEffort,
 			};
 		}
 
-		return { modelId: agentModel, modelArg: agentModel };
+		return { modelId: agentModel, modelArg: agentModel, thinkingArg: agentReasoningEffort };
 	}
 
 	if (parentModel) {
@@ -53,10 +57,11 @@ export function resolveEffectiveSubagentModel(
 			provider: parentModel.provider,
 			modelId: parentModel.id,
 			modelArg: `${parentModel.provider}/${parentModel.id}`,
+			thinkingArg: agentReasoningEffort,
 		};
 	}
 
-	return {};
+	return { thinkingArg: agentReasoningEffort };
 }
 
 function isTypeScriptEntrypoint(filePath: string): boolean {

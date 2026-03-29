@@ -1,4 +1,17 @@
 export {
+	type AskAnswer,
+	type AskOption,
+	type AskQuestion,
+	type AskToolInput,
+	askTool,
+	askToolDefinition,
+	createAskTool,
+	createAskToolDefinition,
+	getAskHandler,
+	registerAskHandler,
+	unregisterAskHandler,
+} from "./ask.js";
+export {
 	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,
@@ -118,6 +131,7 @@ export {
 
 import type { AgentTool } from "@hirocode/agent-core";
 import type { ToolDefinition } from "../extensions/types.js";
+import { askTool, askToolDefinition, createAskTool, createAskToolDefinition } from "./ask.js";
 import {
 	type BashToolOptions,
 	bashTool,
@@ -171,6 +185,7 @@ export const allTools = {
 	ls: lsTool,
 	webfetch: webFetchTool,
 	websearch: webSearchTool,
+	ask: askTool,
 };
 
 export const allToolDefinitions = {
@@ -185,6 +200,7 @@ export const allToolDefinitions = {
 	ls: lsToolDefinition,
 	webfetch: webFetchToolDefinition,
 	websearch: webSearchToolDefinition,
+	ask: askToolDefinition,
 };
 
 export type ToolName = keyof typeof allTools;
@@ -229,6 +245,7 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 		ls: createLsToolDefinition(cwd),
 		webfetch: createWebFetchToolDefinition(),
 		websearch: createWebSearchToolDefinition(),
+		ask: createAskToolDefinition(),
 	};
 }
 
@@ -261,5 +278,6 @@ export function createAllTools(cwd: string, options?: ToolsOptions): Record<Tool
 		ls: createLsTool(cwd),
 		webfetch: createWebFetchTool(),
 		websearch: createWebSearchTool(),
+		ask: createAskTool(),
 	};
 }

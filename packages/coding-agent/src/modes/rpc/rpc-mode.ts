@@ -18,16 +18,11 @@ import type {
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 } from "../../core/extensions/index.js";
+import { RUNTIME_PROTOCOL_VERSION } from "../../core/protocol/types.js";
+import { SessionRuntimeController } from "../../core/runtime/session-runtime-controller.js";
 import { type Theme, theme } from "../interactive/theme/theme.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
-import type {
-	RpcCommand,
-	RpcExtensionUIRequest,
-	RpcExtensionUIResponse,
-	RpcResponse,
-	RpcSessionState,
-	RpcSlashCommand,
-} from "./rpc-types.js";
+import type { RpcCommand, RpcExtensionUIRequest, RpcExtensionUIResponse, RpcResponse } from "./rpc-types.js";
 
 // Re-export types for consumers
 export type {
@@ -60,19 +55,39 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 		data?: object | null,
 	): RpcResponse => {
 		if (data === undefined) {
-			return { id, type: "response", command, success: true } as RpcResponse;
+			return {
+				id,
+				protocolVersion: RUNTIME_PROTOCOL_VERSION,
+				type: "response",
+				command,
+				success: true,
+			} as RpcResponse;
 		}
-		return { id, type: "response", command, success: true, data } as RpcResponse;
+		return {
+			id,
+			protocolVersion: RUNTIME_PROTOCOL_VERSION,
+			type: "response",
+			command,
+			success: true,
+			data,
+		} as RpcResponse;
 	};
 
 	const error = (id: string | undefined, command: string, message: string): RpcResponse => {
-		return { id, type: "response", command, success: false, error: message };
+		return {
+			id,
+			protocolVersion: RUNTIME_PROTOCOL_VERSION,
+			type: "response",
+			command,
+			success: false,
+			error: message,
+		};
 	};
 
 	// Pending extension UI requests waiting for response
 	const pendingExtensionRequests = new Map<
 		string,
-		{ resolve: (value: any) => void; reject: (error: Error) => void }
+		{ resolve: (value: RpcExtensionUIResponse) => void; reject: (error: Error) => void }
 	>();
 
 	// Shutdown request flag
@@ -117,7 +132,12 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 				},
 				reject,
 			});
-			output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
+			output({
+				type: "extension_ui_request",
+				protocolVersion: RUNTIME_PROTOCOL_VERSION,
+				id,
+				...request,
+			} as RpcExtensionUIRequest);
 		});
 	}
 
@@ -144,6 +164,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// Fire and forget - no response needed
 			output({
 				type: "extension_ui_request",
+				protocolVersion: RUNTIME_PROTOCOL_VERSION,
 				id: crypto.randomUUID(),
 				method: "notify",
 				message,
@@ -160,6 +181,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// Fire and forget - no response needed
 			output({
 				type: "extension_ui_request",
+				protocolVersion: RUNTIME_PROTOCOL_VERSION,
 				id: crypto.randomUUID(),
 				method: "setStatus",
 				statusKey: key,
@@ -176,6 +198,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			if (content === undefined || Array.isArray(content)) {
 				output({
 					type: "extension_ui_request",
+					protocolVersion: RUNTIME_PROTOCOL_VERSION,
 					id: crypto.randomUUID(),
 					method: "setWidget",
 					widgetKey: key,
@@ -198,6 +221,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// Fire and forget - host can implement terminal title control
 			output({
 				type: "extension_ui_request",
+				protocolVersion: RUNTIME_PROTOCOL_VERSION,
 				id: crypto.randomUUID(),
 				method: "setTitle",
 				title,
@@ -218,6 +242,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// Fire and forget - host can implement editor control
 			output({
 				type: "extension_ui_request",
+				protocolVersion: RUNTIME_PROTOCOL_VERSION,
 				id: crypto.randomUUID(),
 				method: "set_editor_text",
 				text,
@@ -245,7 +270,14 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 					},
 					reject,
 				});
-				output({ type: "extension_ui_request", id, method: "editor", title, prefill } as RpcExtensionUIRequest);
+				output({
+					type: "extension_ui_request",
+					protocolVersion: RUNTIME_PROTOCOL_VERSION,
+					id,
+					method: "editor",
+					title,
+					prefill,
+				} as RpcExtensionUIRequest);
 			});
 		},
 
@@ -280,49 +312,37 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 		},
 	});
 
-	// Set up extensions with RPC-based UI context
-	await session.bindExtensions({
-		uiContext: createExtensionUIContext(),
-		commandContextActions: {
-			waitForIdle: () => session.agent.waitForIdle(),
-			newSession: async (options) => {
-				// Delegate to AgentSession (handles setup + agent state sync)
-				const success = await session.newSession(options);
-				return { cancelled: !success };
-			},
-			fork: async (entryId) => {
-				const result = await session.fork(entryId);
-				return { cancelled: result.cancelled };
-			},
-			navigateTree: async (targetId, options) => {
-				const result = await session.navigateTree(targetId, {
-					summarize: options?.summarize,
-					customInstructions: options?.customInstructions,
-					replaceInstructions: options?.replaceInstructions,
-					label: options?.label,
-				});
-				return { cancelled: result.cancelled };
-			},
-			switchSession: async (sessionPath) => {
-				const success = await session.switchSession(sessionPath);
-				return { cancelled: !success };
-			},
-			reload: async () => {
-				await session.reload();
-			},
+	const controller = new SessionRuntimeController({
+		session,
+		mode: "rpc",
+		clientCapabilities: {
+			approvalUi: true,
+			missionControl: false,
+			mcpManager: false,
+			specReview: false,
+			widgets: true,
+			customUi: false,
+			themeControl: false,
 		},
+		uiContext: createExtensionUIContext(),
 		shutdownHandler: () => {
 			shutdownRequested = true;
 		},
-		onError: (err) => {
-			output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
+		onExtensionError: (err) => {
+			output({
+				type: "extension_error",
+				protocolVersion: RUNTIME_PROTOCOL_VERSION,
+				extensionPath: err.extensionPath,
+				event: err.event,
+				error: err.error,
+			});
 		},
 	});
 
-	// Output all agent events as JSON
-	session.subscribe((event) => {
+	controller.subscribe((event) => {
 		output(event);
 	});
+	await controller.start();
 
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
@@ -334,37 +354,48 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// =================================================================
 
 			case "prompt": {
-				// Don't await - events will stream
-				// Extension commands are executed immediately, file prompt templates are expanded
-				// If streaming and streamingBehavior specified, queues via steer/followUp
-				session
-					.prompt(command.message, {
-						images: command.images,
-						streamingBehavior: command.streamingBehavior,
-						source: "rpc",
-					})
-					.catch((e) => output(error(id, "prompt", e.message)));
+				const handle = await controller.execute({
+					type: "prompt",
+					message: command.message,
+					images: command.images,
+					streamingBehavior: command.streamingBehavior,
+					source: "rpc",
+					waitForCompletion: false,
+				});
+				void handle.completion.catch((e: Error) => output(error(id, "prompt", e.message)));
 				return success(id, "prompt");
 			}
 
 			case "steer": {
-				await session.steer(command.message, command.images);
+				await controller.execute({ type: "steer", message: command.message, images: command.images });
 				return success(id, "steer");
 			}
 
 			case "follow_up": {
-				await session.followUp(command.message, command.images);
+				await controller.execute({ type: "follow_up", message: command.message, images: command.images });
 				return success(id, "follow_up");
 			}
 
 			case "abort": {
-				await session.abort();
+				await controller.execute({ type: "interrupt" });
 				return success(id, "abort");
 			}
 
+			case "approve": {
+				await controller.execute({ type: "approve", requestId: command.requestId });
+				return success(id, "approve");
+			}
+
+			case "reject": {
+				await controller.execute({ type: "reject", requestId: command.requestId, reason: command.reason });
+				return success(id, "reject");
+			}
+
 			case "new_session": {
-				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
-				const cancelled = !(await session.newSession(options));
+				const { cancelled } = await controller.execute({
+					type: "new_session",
+					parentSession: command.parentSession,
+				});
 				return success(id, "new_session", { cancelled });
 			}
 
@@ -373,21 +404,16 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// =================================================================
 
 			case "get_state": {
-				const state: RpcSessionState = {
-					model: session.model,
-					thinkingLevel: session.thinkingLevel,
-					isStreaming: session.isStreaming,
-					isCompacting: session.isCompacting,
-					steeringMode: session.steeringMode,
-					followUpMode: session.followUpMode,
-					sessionFile: session.sessionFile,
-					sessionId: session.sessionId,
-					sessionName: session.sessionName,
-					autoCompactionEnabled: session.autoCompactionEnabled,
-					messageCount: session.messages.length,
-					pendingMessageCount: session.pendingMessageCount,
-				};
+				const state = await controller.execute({ type: "get_state" });
 				return success(id, "get_state", state);
+			}
+
+			case "set_client_capabilities": {
+				const state = await controller.execute({
+					type: "set_client_capabilities",
+					capabilities: command.capabilities,
+				});
+				return success(id, "set_client_capabilities", state);
 			}
 
 			// =================================================================
@@ -395,25 +421,24 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// =================================================================
 
 			case "set_model": {
-				const models = await session.modelRegistry.getAvailable();
-				const model = models.find((m) => m.provider === command.provider && m.id === command.modelId);
-				if (!model) {
-					return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
-				}
-				await session.setModel(model);
+				const model = await controller.execute({
+					type: "switch_model",
+					provider: command.provider,
+					modelId: command.modelId,
+				});
 				return success(id, "set_model", model);
 			}
 
 			case "cycle_model": {
-				const result = await session.cycleModel();
-				if (!result) {
+				const result = await controller.execute({ type: "cycle_model" });
+				if (result === null) {
 					return success(id, "cycle_model", null);
 				}
 				return success(id, "cycle_model", result);
 			}
 
 			case "get_available_models": {
-				const models = await session.modelRegistry.getAvailable();
+				const models = await controller.execute({ type: "get_available_models" });
 				return success(id, "get_available_models", { models });
 			}
 
@@ -422,16 +447,16 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// =================================================================
 
 			case "set_thinking_level": {
-				session.setThinkingLevel(command.level);
+				await controller.execute({ type: "set_thinking_level", level: command.level });
 				return success(id, "set_thinking_level");
 			}
 
 			case "cycle_thinking_level": {
-				const level = session.cycleThinkingLevel();
-				if (!level) {
+				const result = await controller.execute({ type: "cycle_thinking_level" });
+				if (result === null) {
 					return success(id, "cycle_thinking_level", null);
 				}
-				return success(id, "cycle_thinking_level", { level });
+				return success(id, "cycle_thinking_level", result);
 			}
 
 			// =================================================================
@@ -439,12 +464,12 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// =================================================================
 
 			case "set_steering_mode": {
-				session.setSteeringMode(command.mode);
+				await controller.execute({ type: "set_steering_mode", mode: command.mode });
 				return success(id, "set_steering_mode");
 			}
 
 			case "set_follow_up_mode": {
-				session.setFollowUpMode(command.mode);
+				await controller.execute({ type: "set_follow_up_mode", mode: command.mode });
 				return success(id, "set_follow_up_mode");
 			}
 
@@ -453,12 +478,15 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// =================================================================
 
 			case "compact": {
-				const result = await session.compact(command.customInstructions);
+				const result = await controller.execute({
+					type: "compact",
+					customInstructions: command.customInstructions,
+				});
 				return success(id, "compact", result);
 			}
 
 			case "set_auto_compaction": {
-				session.setAutoCompactionEnabled(command.enabled);
+				await controller.execute({ type: "set_auto_compaction", enabled: command.enabled });
 				return success(id, "set_auto_compaction");
 			}
 
@@ -467,12 +495,12 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// =================================================================
 
 			case "set_auto_retry": {
-				session.setAutoRetryEnabled(command.enabled);
+				await controller.execute({ type: "set_auto_retry", enabled: command.enabled });
 				return success(id, "set_auto_retry");
 			}
 
 			case "abort_retry": {
-				session.abortRetry();
+				await controller.execute({ type: "abort_retry" });
 				return success(id, "abort_retry");
 			}
 
@@ -481,12 +509,12 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// =================================================================
 
 			case "bash": {
-				const result = await session.executeBash(command.command);
+				const result = await controller.execute({ type: "bash", command: command.command });
 				return success(id, "bash", result);
 			}
 
 			case "abort_bash": {
-				session.abortBash();
+				await controller.execute({ type: "abort_bash" });
 				return success(id, "abort_bash");
 			}
 
@@ -495,41 +523,40 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// =================================================================
 
 			case "get_session_stats": {
-				const stats = session.getSessionStats();
+				const stats = await controller.execute({ type: "get_session_stats" });
 				return success(id, "get_session_stats", stats);
 			}
 
 			case "export_html": {
-				const path = await session.exportToHtml(command.outputPath);
-				return success(id, "export_html", { path });
+				const result = await controller.execute({ type: "export_html", outputPath: command.outputPath });
+				return success(id, "export_html", result);
 			}
 
 			case "switch_session": {
-				const cancelled = !(await session.switchSession(command.sessionPath));
+				const { cancelled } = await controller.execute({
+					type: "switch_session",
+					sessionPath: command.sessionPath,
+				});
 				return success(id, "switch_session", { cancelled });
 			}
 
 			case "fork": {
-				const result = await session.fork(command.entryId);
-				return success(id, "fork", { text: result.selectedText, cancelled: result.cancelled });
+				const result = await controller.execute({ type: "fork", entryId: command.entryId });
+				return success(id, "fork", result);
 			}
 
 			case "get_fork_messages": {
-				const messages = session.getUserMessagesForForking();
+				const messages = await controller.execute({ type: "get_fork_messages" });
 				return success(id, "get_fork_messages", { messages });
 			}
 
 			case "get_last_assistant_text": {
-				const text = session.getLastAssistantText();
-				return success(id, "get_last_assistant_text", { text });
+				const result = await controller.execute({ type: "get_last_assistant_text" });
+				return success(id, "get_last_assistant_text", result);
 			}
 
 			case "set_session_name": {
-				const name = command.name.trim();
-				if (!name) {
-					return error(id, "set_session_name", "Session name cannot be empty");
-				}
-				session.setSessionName(name);
+				await controller.execute({ type: "set_session_name", name: command.name });
 				return success(id, "set_session_name");
 			}
 
@@ -538,7 +565,8 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// =================================================================
 
 			case "get_messages": {
-				return success(id, "get_messages", { messages: session.messages });
+				const result = await controller.execute({ type: "get_messages" });
+				return success(id, "get_messages", result);
 			}
 
 			// =================================================================
@@ -546,41 +574,8 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// =================================================================
 
 			case "get_commands": {
-				const commands: RpcSlashCommand[] = [];
-
-				// Extension commands
-				for (const { command, extensionPath } of session.extensionRunner?.getRegisteredCommandsWithPaths() ?? []) {
-					commands.push({
-						name: command.name,
-						description: command.description,
-						source: "extension",
-						path: extensionPath,
-					});
-				}
-
-				// Prompt templates (source is always "user" | "project" | "path" in coding-agent)
-				for (const template of session.promptTemplates) {
-					commands.push({
-						name: template.name,
-						description: template.description,
-						source: "prompt",
-						location: template.source as RpcSlashCommand["location"],
-						path: template.filePath,
-					});
-				}
-
-				// Skills (source is always "user" | "project" | "path" in coding-agent)
-				for (const skill of session.resourceLoader.getSkills().skills) {
-					commands.push({
-						name: `skill:${skill.name}`,
-						description: skill.description,
-						source: "skill",
-						location: skill.source as RpcSlashCommand["location"],
-						path: skill.filePath,
-					});
-				}
-
-				return success(id, "get_commands", { commands });
+				const result = await controller.execute({ type: "get_commands" });
+				return success(id, "get_commands", result);
 			}
 
 			default: {
@@ -634,8 +629,9 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 
 			// Check for deferred shutdown request (idle between commands)
 			await checkShutdownRequested();
-		} catch (e: any) {
-			output(error(undefined, "parse", `Failed to parse command: ${e.message}`));
+		} catch (errorValue: unknown) {
+			const message = errorValue instanceof Error ? errorValue.message : String(errorValue);
+			output(error(undefined, "parse", `Failed to parse command: ${message}`));
 		}
 	};
 

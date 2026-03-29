@@ -13,6 +13,7 @@ import { selectConfig } from "./cli/config-selector.js";
 import { processFileArguments } from "./cli/file-processor.js";
 import { buildInitialMessage } from "./cli/initial-message.js";
 import { listModels } from "./cli/list-models.js";
+import { handleMcpCommand } from "./cli/mcp-cmd.js";
 import { selectSession } from "./cli/session-picker.js";
 import {
 	APP_NAME,
@@ -158,6 +159,19 @@ List installed packages from user and project settings.
 `);
 			return;
 	}
+}
+
+function extractInlineInteractiveCommand(args: string[]): { normalizedArgs: string[]; initialSlashCommand?: string } {
+	const [command, ...rest] = args;
+	if (command !== "mission" && command !== "missions") {
+		return { normalizedArgs: args };
+	}
+
+	const slashCommand = `/${command}${rest.length > 0 ? ` ${rest.join(" ")}` : ""}`;
+	return {
+		normalizedArgs: [],
+		initialSlashCommand: slashCommand,
+	};
 }
 
 function parsePackageCommand(args: string[]): PackageCommandOptions | undefined {
@@ -642,6 +656,8 @@ async function handleConfigCommand(args: string[]): Promise<boolean> {
 }
 
 export async function main(args: string[]) {
+	const inlineCommand = extractInlineInteractiveCommand(args);
+	args = inlineCommand.normalizedArgs;
 	const offlineMode =
 		args.includes("--offline") ||
 		isTruthyEnvFlag(process.env[ENV_OFFLINE]) ||
@@ -656,6 +672,10 @@ export async function main(args: string[]) {
 	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(process.cwd());
 
 	if (await handlePackageCommand(args)) {
+		return;
+	}
+
+	if (await handleMcpCommand(args)) {
 		return;
 	}
 
@@ -779,6 +799,7 @@ export async function main(args: string[]) {
 		settingsManager.getImageAutoResize(),
 		stdinContent,
 	);
+	const effectiveInitialMessage = inlineCommand.initialSlashCommand ?? initialMessage;
 	const isInteractive = !parsed.print && parsed.mode === undefined;
 	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
 	if (startupBenchmark && !isInteractive) {
@@ -882,7 +903,7 @@ export async function main(args: string[]) {
 		const interactiveMode = new InteractiveMode(session, {
 			migratedProviders,
 			modelFallbackMessage,
-			initialMessage,
+			initialMessage: effectiveInitialMessage,
 			initialImages,
 			initialMessages: parsed.messages,
 			verbose: parsed.verbose,
@@ -906,7 +927,7 @@ export async function main(args: string[]) {
 		await runPrintMode(session, {
 			mode,
 			messages: parsed.messages,
-			initialMessage,
+			initialMessage: effectiveInitialMessage,
 			initialImages,
 			runtimeProfile,
 		});

@@ -293,7 +293,11 @@ async function runSingleAgent(
 		};
 	}
 
-	const effectiveModel = resolveEffectiveSubagentModel(discoveredAgent?.model, parentModel);
+	const effectiveModel = resolveEffectiveSubagentModel(
+		discoveredAgent?.model,
+		discoveredAgent?.reasoningEffort,
+		parentModel,
+	);
 	const taskTool = createTaskToolDefinition(defaultCwd, {
 		getParentActiveToolNames: () => codingTools.map((tool) => tool.name),
 	});

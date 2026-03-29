@@ -44,6 +44,7 @@
 		"@hirocode/ai": "^0.61.1",
 		"@hirocode/tui": "^0.61.1",
 		"@mariozechner/jiti": "^2.6.2",
+		"@modelcontextprotocol/sdk": "^1.25.2",
 		"@silvia-odwyer/photon-node": "^0.3.4",
 		"chalk": "^5.5.0",
 		"cli-highlight": "^2.1.11",
@@ -55,10 +56,13 @@
 		"ignore": "^7.0.5",
 		"marked": "^15.0.12",
 		"minimatch": "^10.2.3",
+		"open": "^10.2.0",
 		"proper-lockfile": "^4.1.2",
 		"strip-ansi": "^7.1.0",
+		"tree-sitter-bash": "^0.25.1",
 		"turndown": "^7.2.1",
 		"undici": "^7.19.1",
+		"web-tree-sitter": "^0.26.7",
 		"yaml": "^2.8.2"
 	},
 	"overrides": {

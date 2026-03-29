@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type Static, Type } from "@sinclair/typebox";
 import { TypeCompiler } from "@sinclair/typebox/compiler";
+import { isValidThinkingLevel } from "../../cli/args.js";
 import { getAgentDir } from "../../config.js";
 import { parseFrontmatter } from "../../utils/frontmatter.js";
 import { builtInAgents } from "./builtin-agents.js";
@@ -16,7 +17,20 @@ const agentFrontmatterSchema = Type.Object(
 		description: Type.String({ minLength: 1 }),
 		tools: Type.Optional(Type.Union([Type.String(), Type.Array(Type.String())])),
 		model: Type.Optional(Type.String({ minLength: 1 })),
+		reasoningEffort: Type.Optional(Type.String({ minLength: 1 })),
 		allowSubagents: Type.Optional(Type.Boolean()),
+		mode: Type.Optional(Type.Union([Type.Literal("primary"), Type.Literal("subagent"), Type.Literal("both")])),
+		hidden: Type.Optional(Type.Boolean()),
+		readOnly: Type.Optional(Type.Boolean()),
+		specRole: Type.Optional(
+			Type.Union([
+				Type.Literal("general"),
+				Type.Literal("explore"),
+				Type.Literal("planner"),
+				Type.Literal("reviewer"),
+				Type.Literal("validator"),
+			]),
+		),
 		taskPermissions: Type.Optional(
 			Type.Record(
 				Type.String({ minLength: 1 }),
@@ -30,8 +44,39 @@ const agentFrontmatterSchema = Type.Object(
 const validateAgentFrontmatter = TypeCompiler.Compile(agentFrontmatterSchema);
 type AgentFrontmatter = Static<typeof agentFrontmatterSchema>;
 
+// Droid-compatible tool category strings → hirocode tool names
+const TOOL_CATEGORY_MAP: Record<string, string[]> = {
+	"read-only": ["read", "grep", "find", "ls"],
+	edit: ["edit", "write"],
+	execute: ["bash"],
+	web: ["webfetch", "websearch"],
+};
+
+// Sentinel value for MCP tools (resolved at runtime in task-runner)
+export const MCP_TOOLS_SENTINEL = "mcp";
+
+// Droid capitalized tool name aliases → hirocode lowercase names
+const TOOL_NAME_ALIASES: Record<string, string> = {
+	Read: "read",
+	LS: "ls",
+	Grep: "grep",
+	Glob: "find",
+	Create: "write",
+	Edit: "edit",
+	ApplyPatch: "edit",
+	Execute: "bash",
+	WebSearch: "websearch",
+	FetchUrl: "webfetch",
+	TodoWrite: "todowrite",
+	Task: "task",
+};
+
+function resolveToolName(name: string): string {
+	return TOOL_NAME_ALIASES[name] ?? name;
+}
+
 function normalizeTools(value: AgentFrontmatter["tools"]): string[] | undefined {
-	const tools = Array.isArray(value)
+	const raw = Array.isArray(value)
 		? value.map((item) => item.trim()).filter(Boolean)
 		: value
 			? value
@@ -40,11 +85,28 @@ function normalizeTools(value: AgentFrontmatter["tools"]): string[] | undefined 
 					.filter(Boolean)
 			: [];
 
-	if (tools.length === 0) {
+	if (raw.length === 0) {
 		return undefined;
 	}
 
-	return [...new Set(tools)];
+	// Single category string expands to its tool list
+	if (raw.length === 1 && raw[0] in TOOL_CATEGORY_MAP) {
+		return TOOL_CATEGORY_MAP[raw[0]];
+	}
+
+	// Expand any category names mixed into an array, then normalize aliases
+	const expanded: string[] = [];
+	for (const item of raw) {
+		if (item in TOOL_CATEGORY_MAP) {
+			expanded.push(...TOOL_CATEGORY_MAP[item]);
+		} else if (item === MCP_TOOLS_SENTINEL) {
+			expanded.push(MCP_TOOLS_SENTINEL);
+		} else {
+			expanded.push(resolveToolName(item));
+		}
+	}
+
+	return [...new Set(expanded)];
 }
 
 export function parseAgentMarkdown(
@@ -63,12 +125,21 @@ export function parseAgentMarkdown(
 	}
 
 	const parsed = frontmatter as AgentFrontmatter;
+	const reasoningEffort =
+		typeof parsed.reasoningEffort === "string" && isValidThinkingLevel(parsed.reasoningEffort)
+			? parsed.reasoningEffort
+			: undefined;
 	return {
 		name: parsed.name,
 		description: parsed.description,
 		tools: normalizeTools(parsed.tools),
 		model: parsed.model,
+		reasoningEffort,
 		allowSubagents: parsed.allowSubagents,
+		mode: parsed.mode,
+		hidden: parsed.hidden,
+		readOnly: parsed.readOnly,
+		specRole: parsed.specRole,
 		taskPermissions: parsed.taskPermissions
 			? Object.entries(parsed.taskPermissions).map(([pattern, action]) => ({ pattern, action }))
 			: undefined,
@@ -124,6 +195,16 @@ function getUserAgentDirs(): string[] {
 	const primaryDir = path.join(getAgentDir(), "agents");
 	const legacyDir = path.join(os.homedir(), ".pi", "agent", "agents");
 	return primaryDir === legacyDir ? [primaryDir] : [legacyDir, primaryDir];
+}
+
+/** Returns the primary user agents directory (writable). */
+export function getUserAgentsDir(): string {
+	return path.join(getAgentDir(), "agents");
+}
+
+/** Returns the default project agents directory path for a given cwd (may not exist yet). */
+export function getDefaultProjectAgentsDir(cwd: string): string {
+	return path.join(cwd, ".hirocode", "agents");
 }
 
 function findNearestProjectAgentsDir(cwd: string): string | null {

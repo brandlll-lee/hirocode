@@ -195,6 +195,23 @@ describe("SettingsManager", () => {
 
 			expect(manager.getTheme()).toBe("dark");
 		});
+
+		it("should preserve session overrides across saves", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ approvalPolicy: "always-ask", autonomyMode: "normal" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.applyOverrides({ approvalPolicy: "policy-driven", autonomyMode: "auto-medium" });
+			manager.setTheme("light");
+			await manager.flush();
+
+			expect(manager.getApprovalPolicy()).toBe("policy-driven");
+			expect(manager.getAutonomyMode()).toBe("auto-medium");
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.approvalPolicy).toBe("always-ask");
+			expect(savedSettings.autonomyMode).toBe("normal");
+			expect(savedSettings.theme).toBe("light");
+		});
 	});
 
 	describe("error tracking", () => {

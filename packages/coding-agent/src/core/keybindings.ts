@@ -25,6 +25,8 @@ export interface AppKeybindings {
 	"app.editor.external": true;
 	"app.message.followUp": true;
 	"app.message.dequeue": true;
+	"app.spec.toggle": true;
+	"app.autonomy.cycle": true;
 	"app.clipboard.pasteImage": true;
 	"app.session.new": true;
 	"app.session.tree": true;
@@ -84,6 +86,14 @@ export const KEYBINDINGS = {
 	"app.message.dequeue": {
 		defaultKeys: "alt+up",
 		description: "Restore queued messages",
+	},
+	"app.spec.toggle": {
+		defaultKeys: "ctrl+b",
+		description: "Toggle specification mode",
+	},
+	"app.autonomy.cycle": {
+		defaultKeys: "ctrl+x",
+		description: "Cycle autonomy mode",
 	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: process.platform === "win32" ? "alt+v" : "ctrl+v",
@@ -169,6 +179,8 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	externalEditor: "app.editor.external",
 	followUp: "app.message.followUp",
 	dequeue: "app.message.dequeue",
+	toggleSpec: "app.spec.toggle",
+	cycleAutonomy: "app.autonomy.cycle",
 	pasteImage: "app.clipboard.pasteImage",
 	newSession: "app.session.new",
 	tree: "app.session.tree",

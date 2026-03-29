@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import type { ApprovalPolicy, AutonomyMode, MatchedRule, PermissionRule, SandboxPolicy } from "./policy/types.js";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -66,6 +67,10 @@ export interface Settings {
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	approvalPolicy?: ApprovalPolicy;
+	autonomyMode?: AutonomyMode;
+	permissionRules?: PermissionRule[];
+	sandbox?: SandboxPolicy;
 	transport?: TransportSetting; // default: "sse"
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
@@ -228,6 +233,7 @@ export class SettingsManager {
 	private storage: SettingsStorage;
 	private globalSettings: Settings;
 	private projectSettings: Settings;
+	private sessionOverrides: Partial<Settings>;
 	private settings: Settings;
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
@@ -249,10 +255,15 @@ export class SettingsManager {
 		this.storage = storage;
 		this.globalSettings = initialGlobal;
 		this.projectSettings = initialProject;
+		this.sessionOverrides = {};
 		this.globalSettingsLoadError = globalLoadError;
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.settings = this.buildEffectiveSettings();
+	}
+
+	private buildEffectiveSettings(): Settings {
+		return deepMergeSettings(deepMergeSettings(this.globalSettings, this.projectSettings), this.sessionOverrides);
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -384,12 +395,13 @@ export class SettingsManager {
 			this.recordError("project", projectLoad.error);
 		}
 
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.settings = this.buildEffectiveSettings();
 	}
 
 	/** Apply additional overrides on top of current settings */
 	applyOverrides(overrides: Partial<Settings>): void {
-		this.settings = deepMergeSettings(this.settings, overrides);
+		this.sessionOverrides = deepMergeSettings(this.sessionOverrides, overrides);
+		this.settings = this.buildEffectiveSettings();
 	}
 
 	/** Mark a global field as modified during this session */
@@ -481,7 +493,7 @@ export class SettingsManager {
 	}
 
 	private save(): void {
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.settings = this.buildEffectiveSettings();
 
 		if (this.globalSettingsLoadError) {
 			return;
@@ -498,7 +510,7 @@ export class SettingsManager {
 
 	private saveProjectSettings(settings: Settings): void {
 		this.projectSettings = structuredClone(settings);
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.settings = this.buildEffectiveSettings();
 
 		if (this.projectSettingsLoadError) {
 			return;
@@ -961,5 +973,79 @@ export class SettingsManager {
 
 	getCodeBlockIndent(): string {
 		return this.settings.markdown?.codeBlockIndent ?? "  ";
+	}
+
+	getApprovalPolicy(): ApprovalPolicy {
+		return this.settings.approvalPolicy ?? "always-ask";
+	}
+
+	setApprovalPolicy(policy: ApprovalPolicy): void {
+		this.globalSettings.approvalPolicy = policy;
+		this.markModified("approvalPolicy");
+		this.save();
+	}
+
+	getAutonomyMode(): AutonomyMode {
+		return this.settings.autonomyMode ?? "normal";
+	}
+
+	setAutonomyMode(mode: AutonomyMode): void {
+		this.globalSettings.autonomyMode = mode;
+		this.markModified("autonomyMode");
+		this.save();
+	}
+
+	getSandboxPolicy(): SandboxPolicy {
+		return {
+			enabled: this.settings.sandbox?.enabled ?? false,
+			adapter: this.settings.sandbox?.adapter ?? "local",
+			network: this.settings.sandbox?.network,
+			filesystem: this.settings.sandbox?.filesystem,
+			ignoreViolations: this.settings.sandbox?.ignoreViolations,
+			enableWeakerNestedSandbox: this.settings.sandbox?.enableWeakerNestedSandbox,
+		};
+	}
+
+	setSandboxPolicy(policy: SandboxPolicy): void {
+		this.globalSettings.sandbox = {
+			...this.globalSettings.sandbox,
+			...policy,
+		};
+		this.markModified("sandbox");
+		this.save();
+	}
+
+	getGlobalPermissionRules(): PermissionRule[] {
+		return [...(this.globalSettings.permissionRules ?? [])];
+	}
+
+	getProjectPermissionRules(): PermissionRule[] {
+		return [...(this.projectSettings.permissionRules ?? [])];
+	}
+
+	getPermissionRules(): PermissionRule[] {
+		return [...this.getGlobalPermissionRules(), ...this.getProjectPermissionRules()];
+	}
+
+	getGlobalPermissionRulesWithSource(): Array<PermissionRule & { source: MatchedRule["source"] }> {
+		return this.getGlobalPermissionRules().map((rule) => ({ ...rule, source: "global" as const }));
+	}
+
+	getProjectPermissionRulesWithSource(): Array<PermissionRule & { source: MatchedRule["source"] }> {
+		return this.getProjectPermissionRules().map((rule) => ({ ...rule, source: "project" as const }));
+	}
+
+	addPermissionRule(scope: SettingsScope, rule: PermissionRule): void {
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.permissionRules = [...(projectSettings.permissionRules ?? []), rule];
+			this.markProjectModified("permissionRules");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.permissionRules = [...(this.globalSettings.permissionRules ?? []), rule];
+		this.markModified("permissionRules");
+		this.save();
 	}
 }
