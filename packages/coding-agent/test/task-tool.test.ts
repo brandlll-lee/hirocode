@@ -55,6 +55,23 @@ beforeAll(() => {
 });
 
 describe("task core tool", () => {
+	it("lists available subagents in the task tool description without biasing toward explore", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "hirocode-task-description-"));
+		createdDirs.push(root);
+		const tool = createTaskToolDefinition(root, { getParentActiveToolNames: () => ["read", "bash", "task"] });
+
+		expect(tool.description).toContain("Available subagents:");
+		expect(tool.description).toContain("general (built-in)");
+		expect(tool.description).toContain("web (built-in)");
+		expect(tool.description).toContain("explore (built-in)");
+		expect(tool.promptGuidelines).not.toContain(
+			"Prefer built-in general or explore agents when no project-specific custom agent is a better fit.",
+		);
+		expect(tool.promptGuidelines).toContain(
+			"Choose the most specific available subagent for the task. Use general only when no specialized subagent fits.",
+		);
+	});
+
 	it("surfaces built-in agents in unknown-agent errors", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "hirocode-task-tool-"));
 		createdDirs.push(root);
@@ -333,5 +350,95 @@ describe("task core tool", () => {
 		const expanded = component.render(100).join("\n");
 		expect(expanded).toContain("output line 1");
 		expect(expanded).toContain("output line 20");
+	});
+
+	it("refreshes collapsed task progress when partial updates arrive", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "hirocode-task-partial-render-"));
+		createdDirs.push(root);
+		const tool = createTaskToolDefinition(root, { getParentActiveToolNames: () => ["read", "bash", "task"] });
+		const component = new ToolExecutionComponent(
+			"task",
+			"tool-render-partial-1",
+			{
+				description: "Inspect subagent progress",
+				prompt: "Track partial progress",
+				subagent_type: "web",
+			},
+			{},
+			tool,
+			createFakeTui(),
+		);
+		component.markExecutionStarted();
+
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "(running...)" }],
+				details: {
+					agentScope: "user",
+					projectAgentsDir: null,
+					result: {
+						taskId: "task-partial-1",
+						parentSessionId: "parent-1",
+						sessionId: "task-partial-1",
+						sessionFile: path.join(root, "task-partial-1.jsonl"),
+						agent: "web",
+						agentSource: "built-in",
+						task: "Track partial progress",
+						exitCode: 0,
+						messages: [],
+						stderr: "",
+						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+					},
+				},
+				isError: false,
+			},
+			true,
+		);
+
+		const firstCollapsed = component.render(100).join("\n");
+		expect(firstCollapsed).toContain("(no output)");
+
+		const assistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "Searching vendor sites for current Windows screen recorders..." }],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		} as AssistantMessage;
+
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "Searching vendor sites for current Windows screen recorders..." }],
+				details: {
+					agentScope: "user",
+					projectAgentsDir: null,
+					result: {
+						taskId: "task-partial-1",
+						parentSessionId: "parent-1",
+						sessionId: "task-partial-1",
+						sessionFile: path.join(root, "task-partial-1.jsonl"),
+						agent: "web",
+						agentSource: "built-in",
+						task: "Track partial progress",
+						exitCode: 0,
+						messages: [assistantMessage],
+						stderr: "",
+						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+					},
+				},
+				isError: false,
+			},
+			true,
+		);
+
+		const secondCollapsed = component.render(100).join("\n");
+		expect(secondCollapsed).toContain("Searching vendor sites for current Windows screen recorders...");
+		expect(secondCollapsed).not.toContain("(no output)");
 	});
 });

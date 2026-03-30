@@ -91,19 +91,11 @@ export function createAskToolDefinition(): ToolDefinition<typeof askToolSchema> 
 		parameters: askToolSchema,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const handler = ctx?.sessionManager ? getAskHandler(ctx.sessionManager) : undefined;
-
-			let answers: AskAnswer[];
-			if (handler) {
-				try {
-					answers = await handler(params.questions);
-				} catch {
-					// User dismissed — return first option of each question as fallback
-					answers = params.questions.map((q) => q.options[0]?.label ?? "");
-				}
-			} else {
-				// Non-interactive mode: auto-pick first option
-				answers = params.questions.map((q) => q.options[0]?.label ?? "");
+			if (!handler) {
+				throw new Error("Ask tool is unavailable in this session.");
 			}
+
+			const answers = await handler(params.questions);
 
 			const lines = params.questions.map((q, i) => `"${q.question}"="${answers[i] ?? ""}"`);
 			return {

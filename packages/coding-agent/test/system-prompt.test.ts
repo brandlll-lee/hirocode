@@ -33,6 +33,7 @@ describe("buildSystemPrompt", () => {
 					edit: "Make surgical edits",
 					write: "Create or overwrite files",
 					task: "Delegate work to a subagent",
+					todowrite: "Create or replace the current structured todo list",
 				},
 				contextFiles: [],
 				skills: [],
@@ -44,6 +45,8 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("- edit:");
 			expect(prompt).toContain("- write:");
 			expect(prompt).toContain("- task: Delegate work to a subagent");
+			expect(prompt).toContain("- todowrite: Create or replace the current structured todo list");
+			expect(prompt).not.toContain("call todowrite before any other tool");
 		});
 	});
 

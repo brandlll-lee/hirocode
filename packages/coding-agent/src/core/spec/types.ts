@@ -29,25 +29,11 @@ export interface SpecPlan {
 
 export type SpecPlanSections = SpecPlan;
 
-export interface SpecPlanningEvidence {
-	hasGrounding: boolean;
-	hasAsk: boolean;
-	hasAgentsGuidance: boolean;
-	hasDependencyReview: boolean;
-	askCount: number;
-	hasWebSearch: boolean;
-	hasWebFetch: boolean;
-	hasVersionResearch?: boolean;
-}
-
 export interface SpecSessionState {
 	id: string;
 	maskEnabled?: boolean;
 	phase: SpecPhase;
 	updatedAt: string;
-	planningStartedAt?: string;
-	planningTurnCount?: number;
-	planningEvidence?: SpecPlanningEvidence;
 	title?: string;
 	request?: string;
 	artifactPath?: string;

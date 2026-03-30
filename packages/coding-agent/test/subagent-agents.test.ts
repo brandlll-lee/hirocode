@@ -196,7 +196,7 @@ Legacy prompt.
 		expect(byName.get("explore")?.source).toBe("built-in");
 	});
 
-	it("includes built-in general and explore agents even without custom files", () => {
+	it("includes built-in general, explore, web, planner, and reviewer agents even without custom files", () => {
 		const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hirocode-built-in-agents-"));
 		process.env[AGENT_DIR_ENV] = path.join(tempRoot, "home-agent");
 
@@ -214,6 +214,13 @@ Legacy prompt.
 			tools: ["read", "grep", "find", "ls", "bash"],
 			readOnly: true,
 			specRole: "explore",
+		});
+		expect(byName.get("web")).toMatchObject({
+			name: "web",
+			source: "built-in",
+			tools: ["webfetch", "websearch"],
+			readOnly: true,
+			specRole: "web",
 		});
 		expect(byName.get("planner")).toMatchObject({
 			name: "planner",

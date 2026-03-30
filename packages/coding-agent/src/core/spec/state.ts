@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { CustomEntry, ReadonlySessionManager, SessionManager } from "../session-manager.js";
-import { createEmptySpecPlanningEvidence, extractSpecPlanSections, normalizeSpecPlanningEvidence } from "./plan.js";
+import { extractSpecPlanSections } from "./plan.js";
 import type { SpecPlanSections, SpecSessionState } from "./types.js";
 
 export const SPEC_STATE_CUSTOM_TYPE = "hirocode.spec.state";
@@ -39,14 +39,6 @@ export function createSpecState(overrides?: Partial<SpecSessionState>): SpecSess
 		maskEnabled: overrides?.maskEnabled ?? (overrides?.phase !== undefined ? overrides.phase !== "inactive" : false),
 		phase,
 		updatedAt: overrides?.updatedAt ?? new Date().toISOString(),
-		planningStartedAt: overrides?.planningStartedAt ?? (phase === "planning" ? new Date().toISOString() : undefined),
-		planningTurnCount: overrides?.planningTurnCount ?? (phase === "planning" ? 0 : undefined),
-		planningEvidence:
-			overrides?.planningEvidence !== undefined
-				? normalizeSpecPlanningEvidence(overrides.planningEvidence)
-				: phase === "planning"
-					? createEmptySpecPlanningEvidence()
-					: undefined,
 		title: overrides?.title,
 		request: overrides?.request,
 		artifactPath: overrides?.artifactPath,
@@ -63,9 +55,6 @@ export function createInactiveSpecState(state: SpecSessionState | undefined): Sp
 		...state,
 		maskEnabled: false,
 		phase: "inactive",
-		planningStartedAt: undefined,
-		planningTurnCount: undefined,
-		planningEvidence: undefined,
 		previousModel: undefined,
 		previousActiveTools: undefined,
 	});
@@ -77,18 +66,24 @@ export function specHasPlan(
 	return Boolean(state?.plan);
 }
 
+export function isSpecArmedForNextTurn(state: SpecSessionState | undefined): boolean {
+	return Boolean(state && state.phase === "planning");
+}
+
+export function hasPendingSpecPlan(
+	state: SpecSessionState | undefined,
+): state is SpecSessionState & { plan: SpecPlanSections } {
+	return Boolean(specHasPlan(state) && state.phase === "approved");
+}
+
 function normalizeSpecSessionState(state: SpecSessionState): SpecSessionState {
+	if (state.phase === "planning" && state.maskEnabled === false) {
+		return createInactiveSpecState(state);
+	}
+
 	return {
 		...state,
 		maskEnabled: state.maskEnabled ?? state.phase !== "inactive",
-		planningStartedAt: state.planningStartedAt ?? (state.phase === "planning" ? state.updatedAt : undefined),
-		planningTurnCount: state.planningTurnCount ?? (state.phase === "planning" ? 0 : undefined),
-		planningEvidence:
-			state.planningEvidence !== undefined
-				? normalizeSpecPlanningEvidence(state.planningEvidence)
-				: state.phase === "planning"
-					? createEmptySpecPlanningEvidence()
-					: undefined,
 		plan: state.plan ? normalizeSpecPlan(state.plan) : undefined,
 	};
 }
@@ -124,30 +119,6 @@ function isSpecSessionState(value: unknown): value is SpecSessionState {
 		return false;
 	}
 	if (state.maskEnabled !== undefined && typeof state.maskEnabled !== "boolean") {
-		return false;
-	}
-	if (state.planningStartedAt !== undefined && typeof state.planningStartedAt !== "string") {
-		return false;
-	}
-	if (state.planningTurnCount !== undefined && typeof state.planningTurnCount !== "number") {
-		return false;
-	}
-	if (
-		state.planningEvidence !== undefined &&
-		(!state.planningEvidence ||
-			typeof state.planningEvidence !== "object" ||
-			typeof state.planningEvidence.hasGrounding !== "boolean" ||
-			typeof state.planningEvidence.hasAsk !== "boolean" ||
-			(state.planningEvidence.hasAgentsGuidance !== undefined &&
-				typeof state.planningEvidence.hasAgentsGuidance !== "boolean") ||
-			(state.planningEvidence.hasDependencyReview !== undefined &&
-				typeof state.planningEvidence.hasDependencyReview !== "boolean") ||
-			(state.planningEvidence.askCount !== undefined && typeof state.planningEvidence.askCount !== "number") ||
-			typeof state.planningEvidence.hasWebSearch !== "boolean" ||
-			typeof state.planningEvidence.hasWebFetch !== "boolean" ||
-			(state.planningEvidence.hasVersionResearch !== undefined &&
-				typeof state.planningEvidence.hasVersionResearch !== "boolean"))
-	) {
 		return false;
 	}
 

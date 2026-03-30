@@ -66,6 +66,7 @@ import { convertMcpToolToDefinition, McpManager, watchMcpConfig } from "./mcp/in
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { authorizeDirectBash, authorizeToolCall, getExecutionOperations } from "./policy/authorize.js";
+import { getToolAvailabilityBlockReason } from "./policy/tool-availability.js";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.js";
@@ -73,6 +74,7 @@ import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader }
 import type { SettingsManager } from "./settings-manager.js";
 import { BUILTIN_SLASH_COMMANDS, type SlashCommandInfo, type SlashCommandLocation } from "./slash-commands.js";
 import { getSpecToolBlockReason } from "./spec/tool-policy.js";
+import { discoverAgents } from "./subagents/agent-registry.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import type { BashOperations } from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
@@ -103,6 +105,31 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 		content: match[3],
 		userMessage: match[4]?.trim() || undefined,
 	};
+}
+
+const EXPLICIT_SUBAGENT_REFERENCE_REGEX =
+	/(^|[\s([{<"'`])@([a-z0-9][a-z0-9_-]*)(?=$|[\s)\]}>"'`.,!?;:，。！？；：、])/g;
+
+export function extractExplicitSubagentNames(text: string, availableAgentNames: string[]): string[] {
+	if (!text.includes("@") || availableAgentNames.length === 0) {
+		return [];
+	}
+
+	const byName = new Map(availableAgentNames.map((name) => [name.toLowerCase(), name]));
+	const requested = new Set<string>();
+
+	for (const match of text.matchAll(new RegExp(EXPLICIT_SUBAGENT_REFERENCE_REGEX))) {
+		const normalized = match[2]?.toLowerCase();
+		if (!normalized) {
+			continue;
+		}
+		const agentName = byName.get(normalized);
+		if (agentName) {
+			requested.add(agentName);
+		}
+	}
+
+	return Array.from(requested);
 }
 
 /** Session-specific events that extend the core AgentEvent */
@@ -139,7 +166,7 @@ export interface AgentSessionConfig {
 	customTools?: ToolDefinition[];
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
-	/** Initial active built-in tool names. Default: [read, bash, edit, write, webfetch, websearch] */
+	/** Initial active built-in tool names. Default: [read, bash, edit, write, webfetch, websearch, task, todowrite] */
 	initialActiveToolNames?: string[];
 	/**
 	 * Override base tools (useful for custom runtimes).
@@ -281,6 +308,21 @@ export class AgentSession {
 
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
+	private _systemPromptOverlay: string | undefined = undefined;
+
+	private _getEffectiveSystemPrompt(): string {
+		const overlay = this._systemPromptOverlay?.trim();
+		if (!overlay) {
+			return this._baseSystemPrompt;
+		}
+		return `${this._baseSystemPrompt}\n\n${overlay}`;
+	}
+
+	setSystemPromptOverlay(overlay: string | undefined): void {
+		const normalized = overlay?.trim();
+		this._systemPromptOverlay = normalized && normalized.length > 0 ? normalized : undefined;
+		this.agent.setSystemPrompt(this._getEffectiveSystemPrompt());
+	}
 
 	private _createBaseToolContext(): ExtensionContext {
 		if (this._extensionRunner) {
@@ -434,16 +476,16 @@ export class AgentSession {
 			}
 
 			try {
-				const specBlockReason = await getSpecToolBlockReason({
+				const availabilityBlockReason = await getToolAvailabilityBlockReason({
 					sessionManager: this.sessionManager,
 					toolName: toolCall.name,
 					args: args as Record<string, unknown>,
 					cwd: this._cwd,
 				});
-				if (specBlockReason) {
+				if (availabilityBlockReason) {
 					return {
 						block: true,
-						reason: specBlockReason,
+						reason: availabilityBlockReason,
 					};
 				}
 
@@ -845,6 +887,15 @@ export class AgentSession {
 	}
 
 	/**
+	 * Get the names of all registered tools (including MCP tools).
+	 * Unlike getActiveToolNames(), this includes tools that are registered
+	 * but not necessarily active — critical for subagent tool delegation.
+	 */
+	getAllRegisteredToolNames(): string[] {
+		return [...this._toolDefinitions.keys()];
+	}
+
+	/**
 	 * Get all configured tools with name, description, and parameter schema.
 	 */
 	getAllTools(): ToolInfo[] {
@@ -879,7 +930,7 @@ export class AgentSession {
 
 		// Rebuild base system prompt with new tool set
 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
-		this.agent.setSystemPrompt(this._baseSystemPrompt);
+		this.agent.setSystemPrompt(this._getEffectiveSystemPrompt());
 	}
 
 	/** Whether compaction or branch summarization is currently running */
@@ -978,8 +1029,24 @@ export class AgentSession {
 
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const appendSystemPrompt =
-			loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : undefined;
+		const appendSections = [...loaderAppendSystemPrompt];
+		if (validToolNames.includes("task")) {
+			const availableAgents = discoverAgents(this._cwd, "both").agents.filter(
+				(agent) => agent.mode !== "primary" && agent.hidden !== true,
+			);
+			if (availableAgents.length > 0) {
+				appendSections.push(
+					[
+						"# Available Subagents",
+						"Use the task tool to delegate focused work to the most relevant subagent. Use general only when no specialized subagent fits.",
+						"<available_subagents>",
+						...availableAgents.map((agent) => `- ${agent.name} (${agent.source}): ${agent.description}`),
+						"</available_subagents>",
+					].join("\n"),
+				);
+			}
+		}
+		const appendSystemPrompt = appendSections.length > 0 ? appendSections.join("\n\n") : undefined;
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
@@ -1039,6 +1106,13 @@ export class AgentSession {
 			}
 		}
 
+		const explicitSubagentNames = extractExplicitSubagentNames(
+			currentText,
+			discoverAgents(this._cwd, "both")
+				.agents.filter((agent) => agent.mode !== "primary")
+				.map((agent) => agent.name),
+		);
+
 		// Expand skill commands (/skill:name args) and prompt templates (/template args)
 		let expandedText = currentText;
 		if (expandPromptTemplates) {
@@ -1072,13 +1146,14 @@ export class AgentSession {
 			timestamp: Date.now(),
 		});
 
-		await this._startTurn(messages, expandedText, currentImages);
+		await this._startTurn(messages, expandedText, currentImages, explicitSubagentNames);
 	}
 
 	private async _startTurn(
 		messages: AgentMessage[],
 		promptForExtensions: string,
 		images?: ImageContent[],
+		explicitSubagentNames: string[] = [],
 	): Promise<void> {
 		this._flushPendingBashMessages();
 
@@ -1115,12 +1190,21 @@ export class AgentSession {
 		this._pendingNextTurnMessages = [];
 		messages.push(...queuedNextTurnMessages);
 
+		const systemPrompt =
+			explicitSubagentNames.length > 0
+				? [
+						this._getEffectiveSystemPrompt(),
+						[
+							"<system_note>",
+							`The user explicitly requested the following subagent(s): ${explicitSubagentNames.join(", ")}.`,
+							"Use the task tool with the requested subagent whenever it is a reasonable fit for the task.",
+							"</system_note>",
+						].join("\n"),
+					].join("\n\n")
+				: this._getEffectiveSystemPrompt();
+
 		if (this._extensionRunner) {
-			const result = await this._extensionRunner.emitBeforeAgentStart(
-				promptForExtensions,
-				images,
-				this._baseSystemPrompt,
-			);
+			const result = await this._extensionRunner.emitBeforeAgentStart(promptForExtensions, images, systemPrompt);
 			if (result?.messages) {
 				for (const msg of result.messages) {
 					messages.push({
@@ -1136,8 +1220,10 @@ export class AgentSession {
 			if (result?.systemPrompt) {
 				this.agent.setSystemPrompt(result.systemPrompt);
 			} else {
-				this.agent.setSystemPrompt(this._baseSystemPrompt);
+				this.agent.setSystemPrompt(systemPrompt);
 			}
+		} else {
+			this.agent.setSystemPrompt(systemPrompt);
 		}
 
 		await this.agent.prompt(messages);
@@ -1346,7 +1432,7 @@ export class AgentSession {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
-			await this._startTurn([appMessage], `[custom:${message.customType}]`);
+			await this._startTurn([appMessage], `[custom:${message.customType}]`, undefined, []);
 		} else {
 			this.agent.appendMessage(appMessage);
 			this.sessionManager.appendCustomMessageEntry(
@@ -1476,6 +1562,8 @@ export class AgentSession {
 		this._steeringMessages = [];
 		this._followUpMessages = [];
 		this._pendingNextTurnMessages = [];
+		this._systemPromptOverlay = undefined;
+		this.agent.setSystemPrompt(this._baseSystemPrompt);
 
 		this.sessionManager.appendThinkingLevelChange(this.thinkingLevel);
 
@@ -2175,7 +2263,7 @@ export class AgentSession {
 
 		this._resourceLoader.extendResources(extensionPaths);
 		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
-		this.agent.setSystemPrompt(this._baseSystemPrompt);
+		this.agent.setSystemPrompt(this._getEffectiveSystemPrompt());
 	}
 
 	private buildExtensionResourcePaths(entries: Array<{ path: string; extensionPath: string }>): Array<{
@@ -2442,7 +2530,10 @@ export class AgentSession {
 			: createAllToolDefinitions(this._cwd, {
 					read: { autoResizeImages },
 					bash: { commandPrefix: shellCommandPrefix },
-					task: { getParentActiveToolNames: () => this.getActiveToolNames() },
+					task: {
+						getParentActiveToolNames: () => this.getActiveToolNames(),
+						getParentAllRegisteredToolNames: () => this.getAllRegisteredToolNames(),
+					},
 				});
 
 		this._baseToolDefinitions = new Map(
@@ -2478,7 +2569,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write", "webfetch", "websearch", "task"];
+			: ["read", "bash", "edit", "write", "webfetch", "websearch", "task", "todowrite"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
@@ -2810,10 +2901,12 @@ export class AgentSession {
 		this._steeringMessages = [];
 		this._followUpMessages = [];
 		this._pendingNextTurnMessages = [];
+		this._systemPromptOverlay = undefined;
 
 		// Set new session
 		this.sessionManager.setSessionFile(sessionPath);
 		this.agent.sessionId = this.sessionManager.getSessionId();
+		this.agent.setSystemPrompt(this._baseSystemPrompt);
 
 		// Reload messages
 		const sessionContext = this.sessionManager.buildSessionContext();

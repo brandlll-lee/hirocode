@@ -5,7 +5,7 @@ export type AgentScope = "user" | "project" | "both";
 export type AgentSource = "built-in" | "user" | "project";
 export type TaskPermissionAction = "allow" | "deny" | "ask";
 export type AgentMode = "primary" | "subagent" | "both";
-export type AgentSpecRole = "general" | "explore" | "planner" | "reviewer" | "validator";
+export type AgentSpecRole = "general" | "explore" | "planner" | "reviewer" | "validator" | "web";
 
 export interface TaskPermissionRule {
 	pattern: string;

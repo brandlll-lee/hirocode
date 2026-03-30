@@ -46,6 +46,37 @@ function cloneTodos(todos: TodoItem[]): TodoItem[] {
 	return todos.map((todo) => ({ ...todo }));
 }
 
+function isTodoStatus(value: unknown): value is TodoItem["status"] {
+	return value === "pending" || value === "in_progress" || value === "completed" || value === "cancelled";
+}
+
+function isTodoPriority(value: unknown): value is TodoItem["priority"] {
+	return value === "high" || value === "medium" || value === "low";
+}
+
+export function isTodoWriteToolDetails(value: unknown): value is TodoWriteToolDetails {
+	if (!value || typeof value !== "object") {
+		return false;
+	}
+
+	const todos = (value as { todos?: unknown }).todos;
+	return (
+		Array.isArray(todos) &&
+		todos.every(
+			(todo) =>
+				todo &&
+				typeof todo === "object" &&
+				typeof (todo as { content?: unknown }).content === "string" &&
+				isTodoStatus((todo as { status?: unknown }).status) &&
+				isTodoPriority((todo as { priority?: unknown }).priority),
+		)
+	);
+}
+
+export function cloneTodoWriteDetails(details: TodoWriteToolDetails): TodoWriteToolDetails {
+	return { todos: cloneTodos(details.todos) };
+}
+
 function getValidationError(input: unknown): string | undefined {
 	if (!validateTodoWrite.Check(input)) {
 		const error = Array.from(validateTodoWrite.Errors(input))[0];
@@ -132,14 +163,7 @@ export function createTodoWriteToolDefinition(): ToolDefinition<typeof todoWrite
 		label: "todowrite",
 		description:
 			"Create or replace a structured todo list for the current task. Provide the full list on every call, and include content, status, and priority for each item.",
-		promptSnippet: "Create or update a structured todo list for multi-step work",
-		promptGuidelines: [
-			"Use todowrite for non-trivial, multi-step work; skip it for simple one-step tasks.",
-			"Every todowrite call must send the complete current todo list, not just the changed items.",
-			"Keep todo items short, action-oriented, and aligned with the user's requested scope.",
-			"Use statuses pending, in_progress, completed, or cancelled, and keep at most one item in_progress at a time.",
-			"Update the list when plans change, and mark items completed or cancelled as soon as their status changes.",
-		],
+		promptSnippet: "Create or replace the current structured todo list",
 		parameters: todoWriteSchema,
 		async execute(_toolCallId, params) {
 			const validationError = getValidationError(params);

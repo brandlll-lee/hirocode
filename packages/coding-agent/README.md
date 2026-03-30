@@ -26,7 +26,7 @@ OSS weekend runs Friday, March 20, 2026 through Monday, March 23, 2026. New issu
 
 Hirocode is a terminal coding agent harness with an extensible core. Adapt hirocode to your workflows, not the other way around, without forking the internals. Extend it with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), and [Themes](#themes). Put your extensions, skills, prompt templates, and themes in [Hirocode Packages](#hirocode-packages) and share them with others via npm or git.
 
-Today the core already includes interactive and headless modes, JSON/RPC integration, session trees with compaction, built-in web/file/shell tools, delegated task sessions via the `task` tool, built-in subagent profiles, and a first-class specification workflow via `/spec`. More advanced workflows like mission orchestration, MCP management, and GitHub automation can already be layered on via extensions and packages while the first-class product surface catches up.
+Today the core already includes interactive and headless modes, JSON/RPC integration, session trees with compaction, built-in web/file/shell tools, delegated task sessions via the `task` tool, built-in subagent profiles, and a first-class specification workflow driven from the interactive UI with `/spec` kept as a compatibility alias. More advanced workflows like mission orchestration, MCP management, and GitHub automation can already be layered on via extensions and packages while the first-class product surface catches up.
 
 Hirocode runs in four modes: interactive, print or JSON, RPC for process integration, and an SDK for embedding in your own apps. See [openclaw/openclaw](https://github.com/openclaw/openclaw) for a real-world SDK integration.
 
@@ -78,7 +78,7 @@ hirocode
 /login  # Then select provider
 ```
 
-Then just talk to hirocode. By default, hirocode gives the model seven built-in tools: `read`, `bash`, `edit`, `write`, `webfetch`, `websearch`, and `task`. Additional built-in tools like `todowrite`, `grep`, `find`, and `ls` can be enabled explicitly. The legacy `pi` command remains available as a compatibility alias, but `hirocode` is the primary CLI name.
+Then just talk to hirocode. By default, hirocode gives the model eight built-in tools: `read`, `bash`, `edit`, `write`, `webfetch`, `websearch`, `task`, and `todowrite`. Additional built-in tools like `grep`, `find`, and `ls` can be enabled explicitly. The legacy `pi` command remains available as a compatibility alias, but `hirocode` is the primary CLI name.
 
 ## Capability Matrix
 
@@ -90,8 +90,8 @@ Hirocode's current product surface is intentionally uneven: some capabilities ar
 - Session persistence, `/resume`, `/tree`, `/fork`, auto-compaction, HTML export, sharing
 - Provider/model selection, OAuth and API-key auth, scoped models, thinking levels
 - Built-in tools: `read`, `bash`, `edit`, `write`, `webfetch`, `websearch`, `task`
-- First-class specification workflow via `/spec`, including plan extraction, approval, and saved spec artifacts
-- Built-in subagent profiles: `general`, `explore`, `planner`, `reviewer`
+- First-class specification workflow from the interactive UI, including plan extraction, approval, and saved spec artifacts (`/spec` remains available as a compatibility alias)
+- Built-in subagent profiles: `general`, `explore`, `web`, `planner`, `reviewer`
 - Resource discovery for AGENTS.md / CLAUDE.md, skills, prompt templates, themes, and extensions
 
 ### Built-in but previously under-documented
@@ -183,6 +183,8 @@ Standard editing keybindings for delete word, undo, etc. See [docs/keybindings.m
 
 Type `/` in the editor to trigger commands. [Extensions](#extensions) can register custom commands, [skills](#skills) are available as `/skill:name`, and [prompt templates](#prompt-templates) expand via `/templatename`.
 
+When you want to bias delegation toward a specific subagent, mention it directly in your prompt with `@agent-name`, for example `@web summarize this page` or `@explore trace the auth flow`.
+
 | Command | Description |
 |---------|-------------|
 | `/login`, `/logout` | OAuth authentication |
@@ -194,7 +196,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/name <name>` | Set session display name |
 | `/session` | Show session info (path, tokens, cost) |
 | `/agents` | Browse available built-in, user, and project subagents |
-| `/spec [request]` | Enter specification mode, review plans, or continue an active spec workflow |
+| `/spec [request]` | Compatibility alias for entering specification mode or reviewing the current spec |
 | `/subagents` | Browse delegated child sessions and jump between them |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/fork` | Create a new session from the current branch |
@@ -530,7 +532,7 @@ cat README.md | hirocode -p "Summarize this text"
 
 | Option | Description |
 |--------|-------------|
-| `--tools <list>` | Enable specific built-in tools (default: `read,bash,edit,write,webfetch,websearch,task`) |
+| `--tools <list>` | Enable specific built-in tools (default: `read,bash,edit,write,webfetch,websearch,task,todowrite`) |
 | `--no-tools` | Disable all built-in tools (extension tools still work) |
 
 Available built-in tools: `read`, `bash`, `edit`, `write`, `task`, `todowrite`, `grep`, `find`, `ls`, `webfetch`, `websearch`

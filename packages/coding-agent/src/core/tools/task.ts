@@ -5,7 +5,9 @@ import { truncateToVisualLines } from "../../modes/interactive/components/visual
 import type { ThemeColor } from "../../modes/interactive/theme/theme.js";
 import { getSessionSafetyServices } from "../approval/runtime-services.js";
 import type { ToolDefinition } from "../extensions/types.js";
-import { readLatestSpecState } from "../spec/state.js";
+import type { ToolPermission } from "../policy/types.js";
+import { getSpecPlanningSubagentNames, SPEC_PLANNING_RECOVERY_HINT } from "../spec/mode.js";
+import { isSpecArmedForNextTurn, readLatestSpecState } from "../spec/state.js";
 import { discoverAgents, formatAgentList } from "../subagents/agent-registry.js";
 import { formatModelReference } from "../subagents/invocation.js";
 import { evaluateTaskPermissions } from "../subagents/permissions.js";
@@ -19,6 +21,7 @@ import {
 import type {
 	AgentConfig,
 	AgentScope,
+	DelegatedTaskApprovalHandler,
 	DelegatedTaskResult,
 	ParentModelReference,
 	TaskSessionMetadata,
@@ -282,6 +285,7 @@ function renderTaskResult(
 			state.cachedSkipped = undefined;
 		},
 	});
+	component.invalidate();
 	return component;
 }
 
@@ -308,21 +312,41 @@ function resolveAgentForExecution(
 
 export interface TaskToolOptions {
 	getParentActiveToolNames?: () => string[];
+	getParentAllRegisteredToolNames?: () => string[];
 }
 
 export function createTaskToolDefinition(
 	_cwd: string,
 	options?: TaskToolOptions,
 ): ToolDefinition<typeof taskToolSchema, TaskToolDetails> {
+	const visibleAgents = (() => {
+		try {
+			return discoverAgents(_cwd, "both").agents.filter(
+				(agent) => agent.mode !== "primary" && agent.hidden !== true,
+			);
+		} catch {
+			// Avoid eager discovery failures during module initialization. Runtime-created tool definitions
+			// rebuild this description once the registry graph has fully loaded.
+			return [] as AgentConfig[];
+		}
+	})();
+	const availableAgentsText =
+		visibleAgents.length > 0
+			? `\n\nAvailable subagents:\n${visibleAgents
+					.map((agent) => `- ${agent.name} (${agent.source}): ${agent.description}`)
+					.join("\n")}`
+			: "";
+
 	return {
 		name: "task",
 		label: "task",
 		description:
-			"Delegate one focused task to a specialized built-in or configured hirocode subagent using an isolated child session.",
+			"Delegate one focused task to a specialized built-in or configured hirocode subagent using an isolated child session." +
+			availableAgentsText,
 		promptSnippet: "Delegate one focused task to a specialized subagent",
 		promptGuidelines: [
 			"Use task for focused delegated work that benefits from isolated context rather than for trivial one-step tasks.",
-			"Prefer built-in general or explore agents when no project-specific custom agent is a better fit.",
+			"Choose the most specific available subagent for the task. Use general only when no specialized subagent fits.",
 			"Resume prior delegated work by passing task_id together with the original subagent_type.",
 		],
 		surfaceStyle: "boxed",
@@ -339,6 +363,9 @@ export function createTaskToolDefinition(
 
 			const agentScope = params.agentScope ?? "user";
 			const discovery = discoverAgents(ctx.cwd, agentScope);
+			const visibleDiscoveredAgents = discovery.agents.filter(
+				(agent) => agent.mode !== "primary" && agent.hidden !== true,
+			);
 			const requestedAgent = discovery.agents.find((agent) => agent.name === params.subagent_type);
 			const locatedTask = params.task_id ? findTaskSession(ctx.sessionManager, params.task_id) : undefined;
 
@@ -368,7 +395,7 @@ export function createTaskToolDefinition(
 
 			const agent = resolveAgentForExecution(requestedAgent, locatedTask?.metadata);
 			if (!agent) {
-				const { text: available } = formatAgentList(discovery.agents, 12);
+				const { text: available } = formatAgentList(visibleDiscoveredAgents, 12);
 				return {
 					content: [
 						{ type: "text", text: `Unknown agent: "${params.subagent_type}". Available agents: ${available}.` },
@@ -377,16 +404,23 @@ export function createTaskToolDefinition(
 				};
 			}
 
-			if (specState?.phase === "planning" && !agent.readOnly) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Canceled: subagent ${agent.name} is not marked read-only and cannot run during specification mode.`,
-						},
-					],
-					details: { agentScope, projectAgentsDir: discovery.projectAgentsDir },
-				};
+			if (isSpecArmedForNextTurn(specState)) {
+				const allowedSpecAgents = getSpecPlanningSubagentNames();
+				const isAllowedSpecAgent =
+					agent.readOnly &&
+					(allowedSpecAgents.includes(agent.name) ||
+						(agent.specRole !== undefined && allowedSpecAgents.includes(agent.specRole)));
+				if (!isAllowedSpecAgent) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Canceled: subagent ${agent.name} cannot run during specification mode. Allowed read-only agents: ${allowedSpecAgents.join(", ")}. ${SPEC_PLANNING_RECOVERY_HINT}`,
+							},
+						],
+						details: { agentScope, projectAgentsDir: discovery.projectAgentsDir },
+					};
+				}
 			}
 
 			if (agent.mode === "primary") {
@@ -516,6 +550,57 @@ export function createTaskToolDefinition(
 				? { provider: ctx.model.provider, id: ctx.model.id }
 				: undefined;
 			const parentActiveToolNames = options?.getParentActiveToolNames?.() ?? [];
+			const parentAllRegisteredToolNames = options?.getParentAllRegisteredToolNames?.() ?? parentActiveToolNames;
+			const delegatedApprovalHandler: DelegatedTaskApprovalHandler = async (request) => {
+				const target = request.summary.trim() || request.kind;
+				const permission = (
+					[
+						"read",
+						"grep",
+						"find",
+						"ls",
+						"edit",
+						"write",
+						"bash",
+						"task",
+						"webfetch",
+						"websearch",
+						"external_directory",
+					] as const
+				).includes(request.kind as ToolPermission)
+					? (request.kind as ToolPermission)
+					: "task";
+
+				if (approval) {
+					const result = await approval.request({
+						permission,
+						pattern: target,
+						normalizedPattern: target,
+						level: "high",
+						summary: `Approve delegated ${request.agent} ${request.kind}`,
+						justification: `Delegated subagent ${request.agent} requested approval: ${request.summary}`,
+						tags: ["delegation", "child-approval", "explicit-approval-required"],
+						displayTarget: target,
+					});
+					return { approved: result.allowed, reason: result.reason };
+				}
+
+				if (ctx.hasUI) {
+					const approved = await ctx.ui.confirm(
+						`Delegated approval\n${request.agent}`,
+						`${request.kind}: ${request.summary}`,
+					);
+					return approved
+						? { approved: true }
+						: { approved: false, reason: "Rejected in delegated approval prompt." };
+				}
+
+				return {
+					approved: false,
+					reason:
+						"Delegated subagent action requires approval, but the parent runtime cannot review delegated approvals.",
+				};
+			};
 			const delegated = await runDelegatedTask({
 				sessionRef: taskSession,
 				agent,
@@ -524,8 +609,10 @@ export function createTaskToolDefinition(
 				cwd: params.cwd,
 				parentModel,
 				parentActiveToolNames,
+				parentAllRegisteredToolNames,
 				signal,
 				resumed: Boolean(locatedTask),
+				approvalHandler: delegatedApprovalHandler,
 				onUpdate: (partialResult) => {
 					onUpdate?.({
 						content: [{ type: "text", text: getDelegatedTaskOutput(partialResult.messages) || "(running...)" }],

@@ -4,7 +4,8 @@ import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { parseArgs, printHelp } from "../src/cli/args.js";
 import { buildSystemPrompt } from "../src/core/system-prompt.js";
 import { allTools, codingTools } from "../src/core/tools/index.js";
-import { createTodoWriteToolDefinition, type TodoItem } from "../src/core/tools/todo.js";
+import { createTodoWriteToolDefinition, isTodoWriteToolDetails, type TodoItem } from "../src/core/tools/todo.js";
+import { PlanDockComponent } from "../src/modes/interactive/components/plan-dock.js";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
@@ -29,7 +30,7 @@ describe("todowrite tool", () => {
 		vi.restoreAllMocks();
 	});
 
-	test("is available but not enabled by default", () => {
+	test("is available and enabled by default", () => {
 		expect(allTools.todowrite.name).toBe("todowrite");
 		expect(codingTools.map((tool) => tool.name)).toEqual([
 			"read",
@@ -39,6 +40,7 @@ describe("todowrite tool", () => {
 			"webfetch",
 			"websearch",
 			"task",
+			"todowrite",
 		]);
 	});
 
@@ -56,6 +58,12 @@ describe("todowrite tool", () => {
 		const result = await tool.execute("tool-2", { todos: [] }, undefined, undefined, {} as never);
 
 		expect(result.details).toEqual({ todos: [] });
+	});
+
+	test("validates todowrite details payloads", () => {
+		expect(isTodoWriteToolDetails({ todos: sampleTodos })).toBe(true);
+		expect(isTodoWriteToolDetails({ todos: [{ content: "Bad", status: "later", priority: "high" }] })).toBe(false);
+		expect(isTodoWriteToolDetails(undefined)).toBe(false);
 	});
 
 	test("rejects invalid status values", async () => {
@@ -116,29 +124,21 @@ describe("todowrite tool", () => {
 		printHelp();
 
 		const output = log.mock.calls.map(([value]) => String(value)).join("\n");
-		expect(output).toContain("default: read,bash,edit,write,webfetch,websearch,task");
+		expect(output).toContain("default: read,bash,edit,write,webfetch,websearch,task,todowrite");
 		expect(output).toContain("task   - Delegate focused work to a built-in or configured subagent session");
 		expect(output).toContain("todowrite");
 		expect(output).toContain("Create or replace a structured todo list");
 	});
 
-	test("system prompt omits todowrite by default and includes it when selected", () => {
+	test("tool definition stays capability-focused instead of prescribing usage policy", () => {
 		const tool = createTodoWriteToolDefinition();
-		const defaultPrompt = buildSystemPrompt({
-			toolSnippets: {
-				read: "Read file contents",
-				bash: "Execute bash commands",
-				edit: "Make surgical edits",
-				write: "Create or overwrite files",
-				webfetch: "Fetch URL contents",
-				websearch: "Search the web for current information",
-			},
-			contextFiles: [],
-			skills: [],
-		});
 
-		expect(defaultPrompt).not.toContain("todowrite");
+		expect(tool.promptSnippet).toBe("Create or replace the current structured todo list");
+		expect(tool.promptGuidelines).toBeUndefined();
+	});
 
+	test("system prompt lists todowrite without hardcoded workflow guidance", () => {
+		const tool = createTodoWriteToolDefinition();
 		const selectedPrompt = buildSystemPrompt({
 			selectedTools: ["todowrite"],
 			toolSnippets: { todowrite: tool.promptSnippet ?? "" },
@@ -147,10 +147,9 @@ describe("todowrite tool", () => {
 			skills: [],
 		});
 
-		expect(selectedPrompt).toContain("- todowrite: Create or update a structured todo list for multi-step work");
-		expect(selectedPrompt).toContain(
-			"Use todowrite for non-trivial, multi-step work; skip it for simple one-step tasks.",
-		);
+		expect(selectedPrompt).toContain("- todowrite: Create or replace the current structured todo list");
+		expect(selectedPrompt).not.toContain("call todowrite before any other tool");
+		expect(selectedPrompt).not.toContain("Use todowrite to keep a structured plan");
 	});
 
 	test("renders collapsed and expanded todo results", () => {
@@ -184,5 +183,28 @@ describe("todowrite tool", () => {
 		expect(expanded).toContain("Inspect current tool architecture");
 		expect(expanded).toContain("Implement todowrite core tool");
 		expect(expanded).toContain("Add focused tests");
+	});
+
+	test("renders plan dock in collapsed and expanded modes", () => {
+		const dock = new PlanDockComponent([
+			...sampleTodos,
+			{ content: "Verify interactive UI updates", status: "pending", priority: "medium" },
+			{ content: "Check detached-session rebuild", status: "pending", priority: "medium" },
+			{ content: "Review docs", status: "pending", priority: "low" },
+			{ content: "Ship", status: "pending", priority: "low" },
+		]);
+
+		const collapsed = stripAnsi(dock.render(120).join("\n"));
+		expect(collapsed).toContain("Plan · 1/7");
+		expect(collapsed).toContain("Inspect current tool architecture");
+		expect(collapsed).toContain("Implement todowrite core tool");
+		expect(collapsed).toContain("... 1 more");
+		expect(collapsed).toContain("Ctrl+O to view all");
+		expect(collapsed).not.toContain("Ship");
+
+		dock.setExpanded(true);
+		const expanded = stripAnsi(dock.render(120).join("\n"));
+		expect(expanded).toContain("Ship");
+		expect(expanded).not.toContain("... 1 more");
 	});
 });

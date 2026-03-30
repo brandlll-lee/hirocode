@@ -38,15 +38,44 @@ const STANDARD_TOOL_NAMES = new Set([
 	"websearch",
 ]);
 
+function resolveToolWildcards(tools: string[], allRegisteredTools: string[]): string[] {
+	const result = new Set<string>();
+	for (const tool of tools) {
+		if (tool === "*") {
+			// Wildcard: include all registered tools
+			for (const t of allRegisteredTools) {
+				result.add(t);
+			}
+		} else if (tool === "mcp:*") {
+			// MCP wildcard: include all MCP tools
+			for (const t of allRegisteredTools) {
+				if (t.startsWith("mcp:") || t.startsWith("mcp/")) {
+					result.add(t);
+				}
+			}
+		} else {
+			result.add(tool);
+		}
+	}
+	return [...result];
+}
+
 function resolveMcpSentinel(tools: string[], parentActiveToolNames: string[]): string[] {
 	if (!tools.includes(MCP_TOOLS_SENTINEL)) return tools;
 	const mcpTools = parentActiveToolNames.filter((t) => !STANDARD_TOOL_NAMES.has(t.toLowerCase()));
 	return [...tools.filter((t) => t !== MCP_TOOLS_SENTINEL), ...mcpTools];
 }
 
-function getConfiguredTools(agent: AgentConfig, parentActiveToolNames: string[]): string[] | undefined {
+function getConfiguredTools(
+	agent: AgentConfig,
+	parentActiveToolNames: string[],
+	parentAllRegisteredToolNames: string[],
+): string[] | undefined {
 	const rawTools = agent.tools && agent.tools.length > 0 ? agent.tools : parentActiveToolNames;
-	const withMcp = resolveMcpSentinel(rawTools, parentActiveToolNames);
+
+	// Resolve wildcards against ALL registered tools (includes MCP tools)
+	const withWildcards = resolveToolWildcards(rawTools, parentAllRegisteredToolNames);
+	const withMcp = resolveMcpSentinel(withWildcards, parentAllRegisteredToolNames);
 	const withoutTask = agent.allowSubagents
 		? withMcp
 		: withMcp.filter((toolName) => {
@@ -83,6 +112,7 @@ export async function runDelegatedTask(options: {
 	cwd?: string;
 	parentModel?: ParentModelReference;
 	parentActiveToolNames: string[];
+	parentAllRegisteredToolNames?: string[];
 	signal?: AbortSignal;
 	onUpdate?: (result: DelegatedTaskResult) => void;
 	resumed?: boolean;
@@ -93,7 +123,11 @@ export async function runDelegatedTask(options: {
 		options.agent.reasoningEffort,
 		options.parentModel,
 	);
-	const configuredTools = getConfiguredTools(options.agent, options.parentActiveToolNames);
+	const configuredTools = getConfiguredTools(
+		options.agent,
+		options.parentActiveToolNames,
+		options.parentAllRegisteredToolNames ?? options.parentActiveToolNames,
+	);
 	let tmpPromptDir: string | undefined;
 	let tmpPromptPath: string | undefined;
 	const currentResult: DelegatedTaskResult = {
@@ -131,23 +165,14 @@ export async function runDelegatedTask(options: {
 			tmpPromptPath = tmp.filePath;
 		}
 
-		const exitCode = options.approvalHandler
-			? await runDelegatedTaskWithRpc({
-					options,
-					currentResult,
-					configuredTools,
-					effectiveModel,
-					tmpPromptPath,
-					emitUpdate,
-				})
-			: await runDelegatedTaskWithJson({
-					options,
-					currentResult,
-					configuredTools,
-					effectiveModel,
-					tmpPromptPath,
-					emitUpdate,
-				});
+		const exitCode = await runDelegatedTaskWithRpc({
+			options,
+			currentResult,
+			configuredTools,
+			effectiveModel,
+			tmpPromptPath,
+			emitUpdate,
+		});
 
 		currentResult.exitCode = exitCode;
 		updateTaskSessionState(currentResult.sessionFile, {
@@ -190,18 +215,13 @@ export function getDelegatedTaskOutput(messages: Message[]): string {
 }
 
 function buildCliArgs(options: {
-	mode: "json" | "rpc";
 	sessionFile: string;
 	modelArg?: string;
 	thinkingArg?: string;
 	configuredTools?: string[];
 	tmpPromptPath?: string;
-	task?: string;
 }): string[] {
-	const args: string[] = ["--mode", options.mode];
-	if (options.mode === "json") {
-		args.push("-p");
-	}
+	const args: string[] = ["--mode", "rpc"];
 	args.push("--session", options.sessionFile);
 	if (options.modelArg) {
 		args.push("--model", options.modelArg);
@@ -218,87 +238,7 @@ function buildCliArgs(options: {
 	if (options.tmpPromptPath) {
 		args.push("--append-system-prompt", options.tmpPromptPath);
 	}
-	if (options.mode === "json" && options.task) {
-		args.push(`Task: ${options.task}`);
-	}
 	return args;
-}
-
-async function runDelegatedTaskWithJson(options: {
-	options: {
-		sessionRef: TaskSessionReference;
-		agent: AgentConfig;
-		task: string;
-		defaultCwd: string;
-		cwd?: string;
-		signal?: AbortSignal;
-	};
-	currentResult: DelegatedTaskResult;
-	configuredTools?: string[];
-	effectiveModel: { modelArg?: string; thinkingArg?: string };
-	tmpPromptPath?: string;
-	emitUpdate: () => void;
-}): Promise<number> {
-	let wasAborted = false;
-	return new Promise<number>((resolve) => {
-		const args = buildCliArgs({
-			mode: "json",
-			sessionFile: options.options.sessionRef.sessionFile,
-			modelArg: options.effectiveModel.modelArg,
-			thinkingArg: options.effectiveModel.thinkingArg,
-			configuredTools: options.configuredTools,
-			tmpPromptPath: options.tmpPromptPath,
-			task: options.options.task,
-		});
-		const invocation = resolveAgentInvocation(args);
-		const proc = spawn(invocation.command, invocation.args, {
-			cwd: options.options.cwd ?? options.options.defaultCwd,
-			shell: false,
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-		let buffer = "";
-
-		proc.stdout.on("data", (data) => {
-			buffer += data.toString();
-			const lines = buffer.split("\n");
-			buffer = lines.pop() || "";
-			for (const line of lines) {
-				processDelegatedEvent(line, options.currentResult, options.emitUpdate);
-			}
-		});
-
-		proc.stderr.on("data", (data) => {
-			options.currentResult.stderr += data.toString();
-		});
-
-		proc.on("close", (code) => {
-			if (buffer.trim()) {
-				processDelegatedEvent(buffer, options.currentResult, options.emitUpdate);
-			}
-			resolve(wasAborted ? 1 : (code ?? 0));
-		});
-
-		proc.on("error", () => {
-			resolve(1);
-		});
-
-		if (options.options.signal) {
-			const killProc = () => {
-				wasAborted = true;
-				proc.kill("SIGTERM");
-				setTimeout(() => {
-					if (!proc.killed) {
-						proc.kill("SIGKILL");
-					}
-				}, 5000);
-			};
-			if (options.options.signal.aborted) {
-				killProc();
-			} else {
-				options.options.signal.addEventListener("abort", killProc, { once: true });
-			}
-		}
-	});
 }
 
 async function runDelegatedTaskWithRpc(options: {
@@ -318,7 +258,6 @@ async function runDelegatedTaskWithRpc(options: {
 	emitUpdate: () => void;
 }): Promise<number> {
 	const args = buildCliArgs({
-		mode: "rpc",
 		sessionFile: options.options.sessionRef.sessionFile,
 		modelArg: options.effectiveModel.modelArg,
 		thinkingArg: options.effectiveModel.thinkingArg,
@@ -410,19 +349,34 @@ async function runDelegatedTaskWithRpc(options: {
 			typedEvent.type === "approval_requested" &&
 			typeof typedEvent.requestId === "string" &&
 			typeof typedEvent.summary === "string" &&
-			typeof typedEvent.kind === "string" &&
-			options.options.approvalHandler
+			typeof typedEvent.kind === "string"
 		) {
 			approvalQueue = approvalQueue.then(async () => {
-				const decision = await options.options.approvalHandler?.({
-					requestId: typedEvent.requestId!,
-					summary: typedEvent.summary!,
-					kind: typedEvent.kind!,
-					taskId: options.currentResult.taskId,
-					sessionId: options.currentResult.sessionId,
-					sessionFile: options.currentResult.sessionFile,
-					agent: options.currentResult.agent,
-				});
+				const decision = await (async () => {
+					if (!options.options.approvalHandler) {
+						return {
+							approved: false,
+							reason:
+								"Delegated task requires approval, but the parent runtime cannot review delegated approvals.",
+						};
+					}
+					try {
+						return await options.options.approvalHandler({
+							requestId: typedEvent.requestId!,
+							summary: typedEvent.summary!,
+							kind: typedEvent.kind!,
+							taskId: options.currentResult.taskId,
+							sessionId: options.currentResult.sessionId,
+							sessionFile: options.currentResult.sessionFile,
+							agent: options.currentResult.agent,
+						});
+					} catch (error) {
+						return {
+							approved: false,
+							reason: error instanceof Error ? error.message : String(error),
+						};
+					}
+				})();
 				if (proc.killed) {
 					return;
 				}

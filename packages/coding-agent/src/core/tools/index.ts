@@ -170,7 +170,16 @@ import { createWriteTool, createWriteToolDefinition, writeTool, writeToolDefinit
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
 
-export const codingTools: Tool[] = [readTool, bashTool, editTool, writeTool, webFetchTool, webSearchTool, taskTool];
+export const codingTools: Tool[] = [
+	readTool,
+	bashTool,
+	editTool,
+	writeTool,
+	webFetchTool,
+	webSearchTool,
+	taskTool,
+	todoWriteTool,
+];
 export const readOnlyTools: Tool[] = [readTool, grepTool, findTool, lsTool];
 
 export const allTools = {
@@ -220,6 +229,7 @@ export function createCodingToolDefinitions(cwd: string, options?: ToolsOptions)
 		createWebFetchToolDefinition(),
 		createWebSearchToolDefinition(),
 		createTaskToolDefinition(cwd, options?.task),
+		createTodoWriteToolDefinition(),
 	];
 }
 
@@ -258,6 +268,7 @@ export function createCodingTools(cwd: string, options?: ToolsOptions): Tool[] {
 		createWebFetchTool(),
 		createWebSearchTool(),
 		createTaskTool(cwd, options?.task),
+		createTodoWriteTool(),
 	];
 }
 

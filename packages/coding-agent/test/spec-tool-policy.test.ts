@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 describe("getSpecToolBlockReason", () => {
-	it("shares the spec planning tool list with interactive mode expectations", () => {
+	it("shares the spec planning tool list with the canonical planning policy", () => {
 		expect(getSpecPlanningToolNames()).toEqual([
 			"read",
 			"bash",
@@ -46,7 +46,7 @@ describe("getSpecToolBlockReason", () => {
 		expect(reason).toBeUndefined();
 	});
 
-	it("still blocks mutating bash commands during spec planning", async () => {
+	it("blocks mutating bash commands with recovery guidance during spec planning", async () => {
 		const root = join(tmpdir(), `hirocode-spec-tool-policy-${Date.now()}-mutating`);
 		tempDirs.push(root);
 		mkdirSync(root, { recursive: true });
@@ -61,6 +61,7 @@ describe("getSpecToolBlockReason", () => {
 		});
 
 		expect(reason).toContain("Specification mode only allows read-only shell commands.");
+		expect(reason).toContain("Continue exploring");
 	});
 
 	it("allows ask during spec planning", async () => {
@@ -87,7 +88,7 @@ describe("getSpecToolBlockReason", () => {
 		expect(reason).toBeUndefined();
 	});
 
-	it("still blocks write during spec planning", async () => {
+	it("blocks write during spec planning with the spec recovery hint", async () => {
 		const root = join(tmpdir(), `hirocode-spec-tool-policy-${Date.now()}-write`);
 		tempDirs.push(root);
 		mkdirSync(root, { recursive: true });
@@ -101,10 +102,11 @@ describe("getSpecToolBlockReason", () => {
 			cwd: root,
 		});
 
-		expect(reason).toBe('Specification mode is read-only. Tool "write" is unavailable until the plan is approved.');
+		expect(reason).toContain('Tool "write" is unavailable until the plan is approved.');
+		expect(reason).toContain("Continue exploring");
 	});
 
-	it("does not block tools when spec planning is hidden", async () => {
+	it("does not block tools after a hidden planning state is normalized away", async () => {
 		const root = join(tmpdir(), `hirocode-spec-tool-policy-${Date.now()}-masked`);
 		tempDirs.push(root);
 		mkdirSync(root, { recursive: true });

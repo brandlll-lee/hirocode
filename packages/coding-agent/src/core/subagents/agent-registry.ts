@@ -29,6 +29,7 @@ const agentFrontmatterSchema = Type.Object(
 				Type.Literal("planner"),
 				Type.Literal("reviewer"),
 				Type.Literal("validator"),
+				Type.Literal("web"),
 			]),
 		),
 		taskPermissions: Type.Optional(
