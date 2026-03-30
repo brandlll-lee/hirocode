@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { EditorTheme, MarkdownTheme, SelectListTheme } from "@hirocode/tui";
 import { type Static, Type } from "@sinclair/typebox";
 import { TypeCompiler } from "@sinclair/typebox/compiler";
+import { renderMermaidASCII } from "beautiful-mermaid";
 import chalk from "chalk";
 import { highlight, supportsLanguage } from "cli-highlight";
 import { getCustomThemesDir, getThemesDir } from "../../../config.js";
@@ -972,10 +973,33 @@ function getCliHighlightTheme(t: Theme): CliHighlightTheme {
 }
 
 /**
+ * Render a Mermaid diagram as ASCII/Unicode art for terminal display.
+ * Falls back to plain code block on any parse/render error.
+ */
+function renderMermaidDiagram(mermaidCode: string): string[] {
+	try {
+		const ascii = renderMermaidASCII(mermaidCode, {
+			useAscii: false,
+			paddingX: 3,
+			paddingY: 1,
+			boxBorderPadding: 0,
+			colorMode: theme.getColorMode() === "truecolor" ? "truecolor" : "ansi256",
+		});
+		return ascii.split("\n");
+	} catch {
+		// Graceful fallback: show raw mermaid code on any error
+		return mermaidCode.split("\n").map((line) => theme.fg("mdCodeBlock", line));
+	}
+}
+
+/**
  * Highlight code with syntax coloring based on file extension or language.
  * Returns array of highlighted lines.
  */
 export function highlightCode(code: string, lang?: string): string[] {
+	if (lang === "mermaid") {
+		return renderMermaidDiagram(code);
+	}
 	// Validate language before highlighting to avoid stderr spam from cli-highlight
 	const validLang = lang && supportsLanguage(lang) ? lang : undefined;
 	// Skip highlighting when no valid language is specified. cli-highlight's
@@ -1062,6 +1086,7 @@ export function getLanguageFromPath(filePath: string): string | undefined {
 		proto: "protobuf",
 		tf: "hcl",
 		hcl: "hcl",
+		mermaid: "mermaid",
 	};
 
 	return extToLang[ext];
@@ -1084,6 +1109,9 @@ export function getMarkdownTheme(): MarkdownTheme {
 		underline: (text: string) => theme.underline(text),
 		strikethrough: (text: string) => chalk.strikethrough(text),
 		highlightCode: (code: string, lang?: string): string[] => {
+			if (lang === "mermaid") {
+				return renderMermaidDiagram(code);
+			}
 			// Validate language before highlighting to avoid stderr spam from cli-highlight
 			const validLang = lang && supportsLanguage(lang) ? lang : undefined;
 			// Skip highlighting when no valid language is specified. cli-highlight's

@@ -111,23 +111,19 @@ import { type SessionContext, SessionManager } from "../../core/session-manager.
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.js";
 import { saveSpecArtifact } from "../../core/spec/artifact.js";
 import {
-	buildSpecExecutionContext,
-	buildSpecPlanningBlockedMessage,
-	buildSpecPlanningContext,
-	buildSpecPlanningContinuationContext,
-	collectSpecPlanningEvidence,
-	evaluateSpecPlanningGate,
-	extractProposedPlanDisplayState,
-	mergeSpecPlanningEvidence,
-	parseSpecPlan,
-	shouldAutoContinueSpecPlanning,
-} from "../../core/spec/plan.js";
+	buildSpecExecutionTurnContext,
+	buildSpecPlanningTurnContext,
+	getSpecPlanningTurnOutcome,
+} from "../../core/spec/mode.js";
+import { extractProposedPlanDisplayState } from "../../core/spec/plan.js";
 import {
 	createInactiveSpecState,
 	createSpecState,
 	getSpecStateEntry,
 	readLatestSpecState,
+	hasPendingSpecPlan as specHasPendingPlan,
 	specHasPlan,
+	isSpecArmedForNextTurn as specTurnIsArmedForNextTurn,
 	writeSpecState,
 } from "../../core/spec/state.js";
 import { getSpecPlanningToolNames } from "../../core/spec/tool-policy.js";
@@ -138,6 +134,7 @@ import { resolveChildSessionOpenMode } from "../../core/subagents/session-naviga
 import { buildTaskNavigationContext } from "../../core/subagents/task-sessions.js";
 import type { AgentConfig, DelegatedTaskApprovalRequest, LocatedTaskSession } from "../../core/subagents/types.js";
 import { type AskAnswer, type AskQuestion, registerAskHandler, unregisterAskHandler } from "../../core/tools/ask.js";
+import { cloneTodoWriteDetails, isTodoWriteToolDetails, type TodoItem } from "../../core/tools/todo.js";
 import type { TruncationResult } from "../../core/tools/truncate.js";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
@@ -166,6 +163,7 @@ import { MissionListComponent } from "./components/mission-list.js";
 import { type MissionPlanOverviewChoice, MissionPlanOverviewComponent } from "./components/mission-plan-overview.js";
 import { ModelSelectorComponent } from "./components/model-selector.js";
 import { OAuthSelectorComponent } from "./components/oauth-selector.js";
+import { PlanDockComponent } from "./components/plan-dock.js";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
 import { SessionSelectorComponent } from "./components/session-selector.js";
 import { SettingsSelectorComponent } from "./components/settings-selector.js";
@@ -223,6 +221,8 @@ export interface InteractiveModeOptions {
 }
 
 export class InteractiveMode {
+	private static readonly TODO_DOCK_WIDGET_KEY = "__todo_dock__";
+
 	private session: AgentSession;
 	private ui: TUI;
 	private chatContainer: Container;
@@ -247,7 +247,6 @@ export class InteractiveMode {
 	private workingElapsedMs = 0;
 	private workingStartedAt: number | undefined = undefined;
 	private workingTimerInterval: ReturnType<typeof setInterval> | undefined = undefined;
-	private specAutoContinuationActive = false;
 
 	private lastSigintTime = 0;
 	private lastEscapeTime = 0;
@@ -311,6 +310,7 @@ export class InteractiveMode {
 	private extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
 	private widgetContainerAbove!: Container;
 	private widgetContainerBelow!: Container;
+	private todoDock: PlanDockComponent | undefined = undefined;
 
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
@@ -505,6 +505,9 @@ export class InteractiveMode {
 			if (component) {
 				component.updateResult({ ...event.result, isError: event.isError });
 				this.detachedActivePendingToolIds.delete(event.toolCallId);
+			}
+			if (event.toolName === "todowrite" && !event.isError && isTodoWriteToolDetails(event.result?.details)) {
+				this.setTodoDockTodos(cloneTodoWriteDetails(event.result.details).todos);
 			}
 		}
 	}
@@ -1471,7 +1474,6 @@ export class InteractiveMode {
 			commandContextActions: {
 				waitForIdle: () => this.session.agent.waitForIdle(),
 				newSession: async (options) => {
-					this.specAutoContinuationActive = false;
 					if (this.loadingAnimation) {
 						this.loadingAnimation.stop();
 						this.loadingAnimation = undefined;
@@ -1500,7 +1502,6 @@ export class InteractiveMode {
 					return { cancelled: false };
 				},
 				fork: async (entryId) => {
-					this.specAutoContinuationActive = false;
 					const result = await this.session.fork(entryId);
 					if (result.cancelled) {
 						return { cancelled: true };
@@ -1515,7 +1516,6 @@ export class InteractiveMode {
 					return { cancelled: false };
 				},
 				navigateTree: async (targetId, options) => {
-					this.specAutoContinuationActive = false;
 					const result = await this.session.navigateTree(targetId, {
 						summarize: options?.summarize,
 						customInstructions: options?.customInstructions,
@@ -1650,6 +1650,9 @@ export class InteractiveMode {
 			const existing = map.get(key);
 			if (existing?.dispose) existing.dispose();
 			map.delete(key);
+			if (key === InteractiveMode.TODO_DOCK_WIDGET_KEY && existing === this.todoDock) {
+				this.todoDock = undefined;
+			}
 		};
 
 		removeExisting(this.extensionWidgetsAbove);
@@ -1691,6 +1694,7 @@ export class InteractiveMode {
 		}
 		this.extensionWidgetsAbove.clear();
 		this.extensionWidgetsBelow.clear();
+		this.todoDock = undefined;
 		this.renderWidgets();
 	}
 
@@ -1750,9 +1754,60 @@ export class InteractiveMode {
 		if (leadingSpacer) {
 			container.addChild(new Spacer(1));
 		}
-		for (const component of widgets.values()) {
+		for (const [, component] of Array.from(widgets.entries()).sort(
+			([leftKey], [rightKey]) =>
+				this.getExtensionWidgetPriority(leftKey) - this.getExtensionWidgetPriority(rightKey),
+		)) {
 			container.addChild(component);
 		}
+	}
+
+	private getExtensionWidgetPriority(key: string): number {
+		if (key === InteractiveMode.TODO_DOCK_WIDGET_KEY) {
+			return -100;
+		}
+		return 0;
+	}
+
+	private syncTodoDockFromMessages(messages: AgentMessage[]): void {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message.role !== "toolResult" || message.toolName !== "todowrite") {
+				continue;
+			}
+			if (!isTodoWriteToolDetails(message.details)) {
+				continue;
+			}
+			this.setTodoDockTodos(cloneTodoWriteDetails(message.details).todos);
+			return;
+		}
+		this.setTodoDockTodos(undefined);
+	}
+
+	private setTodoDockTodos(todos: TodoItem[] | undefined): void {
+		if (!todos || todos.length === 0) {
+			this.todoDock = undefined;
+			this.setExtensionWidget(InteractiveMode.TODO_DOCK_WIDGET_KEY, undefined);
+			return;
+		}
+
+		if (this.todoDock) {
+			this.todoDock.setTodos(todos);
+			this.todoDock.setExpanded(this.toolOutputExpanded);
+			this.renderWidgets();
+			return;
+		}
+
+		this.setExtensionWidget(
+			InteractiveMode.TODO_DOCK_WIDGET_KEY,
+			() => {
+				const component = new PlanDockComponent(todos);
+				component.setExpanded(this.toolOutputExpanded);
+				this.todoDock = component;
+				return component;
+			},
+			{ placement: "aboveEditor" },
+		);
 	}
 
 	/**
@@ -2353,8 +2408,16 @@ export class InteractiveMode {
 		});
 	}
 
-	private isSpecMaskEnabled(state: SpecSessionState | undefined = this.specState): boolean {
-		return Boolean(state && state.phase !== "inactive" && state.maskEnabled !== false);
+	private isSpecArmedForNextTurn(state: SpecSessionState | undefined = this.specState): boolean {
+		return specTurnIsArmedForNextTurn(state);
+	}
+
+	private hasPendingSpecPlan(state: SpecSessionState | undefined = this.specState): boolean {
+		return specHasPendingPlan(state);
+	}
+
+	private shouldHighlightSpecUi(state: SpecSessionState | undefined = this.specState): boolean {
+		return this.isSpecArmedForNextTurn(state) || this.hasPendingSpecPlan(state);
 	}
 
 	private hasMissionModeIndicator(): boolean {
@@ -2449,20 +2512,25 @@ export class InteractiveMode {
 	}
 
 	private createInteractiveAskHandler() {
-		return (questions: AskQuestion[]) =>
-			this.showExtensionCustom<AskAnswer[]>(
+		return async (questions: AskQuestion[]) => {
+			const answers = await this.showExtensionCustom<AskAnswer[] | undefined>(
 				(_tui, _theme, _keybindings, done) =>
 					new AskQuestionComponent({
 						questions,
-						onSubmit: (answers) => done(answers),
-						onCancel: () => done(questions.map((q) => q.options[0]?.label ?? "")),
+						onSubmit: (next) => done(next),
+						onCancel: () => done(undefined),
 					}),
 			);
+			if (!answers) {
+				throw new Error("Question cancelled");
+			}
+			return answers;
+		};
 	}
 
 	private shouldEnableInteractiveAsk(): boolean {
 		const missionPlanning = this.missionState?.status === "planning";
-		const specPlanning = this.specState?.phase === "planning" && this.isSpecMaskEnabled();
+		const specPlanning = this.isSpecArmedForNextTurn();
 		return Boolean(missionPlanning || specPlanning);
 	}
 
@@ -2504,27 +2572,17 @@ export class InteractiveMode {
 	}
 
 	private getAutonomyModeDisplay(): { label: string; description: string } {
-		if (this.specState?.phase === "planning" && this.isSpecMaskEnabled()) {
-			return { label: "Auto (Spec)", description: "planning stays read-only under spec rules" };
-		}
-
 		return describeInteractiveAutonomyPreset(this.getInteractiveAutonomyPreset());
 	}
 
 	private getSpecModeDisplay(): string | undefined {
-		if (!this.isSpecMaskEnabled()) {
-			return undefined;
+		if (this.isSpecArmedForNextTurn()) {
+			return "Spec";
 		}
-		if (!this.specState || this.specState.phase === "inactive") {
-			return undefined;
+		if (this.hasPendingSpecPlan()) {
+			return "Spec Ready";
 		}
-		if (this.specState.phase === "planning") {
-			return "Spec (Planning)";
-		}
-		if (this.specState.phase === "approved") {
-			return "Spec (Approved)";
-		}
-		return "Spec (Executing)";
+		return undefined;
 	}
 
 	private updateModeBanner(): void {
@@ -2543,7 +2601,7 @@ export class InteractiveMode {
 		this.modeContainer.addChild(new TruncatedText(segments.join(theme.fg("dim", " • ")), 1, 0));
 		const hints = [
 			theme.fg("muted", this.getWorkingSessionTimerLabel()),
-			keyHint("app.spec.toggle", "toggle spec"),
+			keyHint("app.spec.toggle", "spec"),
 			keyHint("app.autonomy.cycle", "cycle auto"),
 		];
 		if (this.hasMissionModeIndicator()) {
@@ -2558,30 +2616,20 @@ export class InteractiveMode {
 			return;
 		}
 
-		if (!this.specState || this.specState.phase === "inactive") {
-			await this.enterSpecMode();
+		if (this.hasPendingSpecPlan() || this.specState?.phase === "executing") {
+			await this.showSpecSelector();
 			return;
 		}
 
-		if (this.isSpecMaskEnabled()) {
+		if (this.isSpecArmedForNextTurn()) {
 			await this.restoreSessionAfterSpec(this.specState);
-			this.persistSpecState(createSpecState({ ...this.specState, maskEnabled: false }));
+			this.persistSpecState(createInactiveSpecState(this.specState));
 			await this.applySpecStateToSession(this.specState);
-			this.showStatus("Specification mode disabled for future turns");
+			this.showStatus("Specification is off for the next turn.");
 			return;
 		}
 
-		this.persistSpecState(createSpecState({ ...this.specState, maskEnabled: true }));
-		if (this.specState.phase === "planning") {
-			await this.applySpecStateToSession(this.specState);
-		} else {
-			this.updateModeBanner();
-			this.showStatus(
-				this.specState.phase === "approved"
-					? "Specification mode re-enabled. Use /spec to review or approve the current plan."
-					: "Specification execution context re-enabled.",
-			);
-		}
+		await this.enterSpecMode();
 	}
 
 	private cycleAutonomyMode(): void {
@@ -2592,7 +2640,7 @@ export class InteractiveMode {
 	}
 
 	private updateSpecWidget(): void {
-		if (!specHasPlan(this.specState) || this.missionState || !this.isSpecMaskEnabled()) {
+		if (!specHasPlan(this.specState) || this.missionState || !this.hasPendingSpecPlan()) {
 			this.setExtensionWidget("__spec_card__", undefined);
 			return;
 		}
@@ -2600,7 +2648,7 @@ export class InteractiveMode {
 			"__spec_card__",
 			[
 				this.getSpecWidgetTitleLine(),
-				`${theme.fg("muted", "Use ")}${theme.fg(this.getSpecThemeColor(), "/spec")}${theme.fg("muted", " to review, approve, or iterate on the current plan")}`,
+				`${theme.fg("muted", "Press ")}${theme.fg(this.getSpecThemeColor(), "Ctrl+B")}${theme.fg("muted", " to review, approve, or iterate on the current plan")}`,
 			],
 			{ placement: "aboveEditor" },
 		);
@@ -2660,10 +2708,6 @@ export class InteractiveMode {
 					createSpecState({
 						...this.specState,
 						phase: "planning",
-						maskEnabled: true,
-						planningStartedAt: undefined,
-						planningTurnCount: undefined,
-						planningEvidence: undefined,
 					}),
 				);
 				await this.applySpecStateToSession(this.specState);
@@ -2714,23 +2758,6 @@ export class InteractiveMode {
 		return undefined;
 	}
 
-	private formatSpecPlanningGateStatus(missing: string[]): string {
-		return [
-			"Specification plan blocked until the planning prerequisites are complete:",
-			...missing.map((item) => `- ${item}`),
-		].join("\n");
-	}
-
-	private showSpecPlanningBlockedFeedback(missing: string[]): void {
-		this.addMessageToChat({
-			role: "custom",
-			customType: "spec-plan-blocked",
-			content: buildSpecPlanningBlockedMessage(missing),
-			display: true,
-			timestamp: Date.now(),
-		});
-	}
-
 	private persistSpecState(state: SpecSessionState): void {
 		const { updatedAt: _updatedAt, ...rest } = state;
 		this.specState = writeSpecState(this.sessionManager, rest);
@@ -2770,7 +2797,6 @@ export class InteractiveMode {
 		nextState: SpecSessionState,
 		statusMessage?: string,
 	): Promise<void> {
-		this.specAutoContinuationActive = false;
 		await this.restoreSessionAfterSpec(state);
 		this.persistSpecState(nextState);
 		await this.applySpecStateToSession(this.specState);
@@ -2783,14 +2809,15 @@ export class InteractiveMode {
 		this.specState = state;
 		this.syncInteractiveAskAvailability();
 		this.clearStreamingSpecPlan();
-		this.session.removeCustomMessages(["spec-mode-context", "spec-approved", "spec-plan"]);
+		this.session.removeCustomMessages(["spec-mode-context", "spec-execution-context", "spec-approved", "spec-plan"]);
+		this.session.setSystemPromptOverlay(undefined);
 		this.updateSpecWidget();
 		this.updateModeBanner();
-		if (!state || state.phase === "inactive" || !this.isSpecMaskEnabled(state)) {
+		if (!state || state.phase === "inactive") {
 			return;
 		}
 
-		if (state.phase === "planning") {
+		if (this.isSpecArmedForNextTurn(state)) {
 			this.session.setActiveToolsByName(getSpecPlanningToolNames());
 			if (state.planningModel?.provider && state.planningModel.modelId) {
 				const model = this.session.modelRegistry.find(state.planningModel.provider, state.planningModel.modelId);
@@ -2801,11 +2828,11 @@ export class InteractiveMode {
 					}
 				}
 			}
-			this.showStatus(`Specification mode active${state.title ? `: ${state.title}` : ""}`);
+			this.showStatus(`Specification is on for the next turn${state.title ? `: ${state.title}` : ""}`);
 			return;
 		}
 
-		if (state.phase === "approved") {
+		if (this.hasPendingSpecPlan(state)) {
 			this.showStatus(`Specification ready for approval${state.title ? `: ${state.title}` : ""}`);
 			return;
 		}
@@ -2837,7 +2864,13 @@ export class InteractiveMode {
 		text: string,
 		options?: { images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" },
 	): Promise<void> {
-		this.session.removeCustomMessages(["spec-mode-context", "mission-mode-context"]);
+		const deliverAs =
+			options?.streamingBehavior === "followUp"
+				? "followUp"
+				: options?.streamingBehavior === "steer"
+					? "steer"
+					: "nextTurn";
+		this.session.removeCustomMessages(["mission-mode-context", "spec-mode-context", "spec-execution-context"]);
 		if (this.missionState && ["planning", "running", "paused"].includes(this.missionState.status)) {
 			const missionContext =
 				this.missionState.status === "planning"
@@ -2845,12 +2878,6 @@ export class InteractiveMode {
 							userConfirmedReady: looksLikeMissionPlanReadySignal(text),
 						})
 					: this.buildMissionExecutionContext(this.missionState);
-			const deliverAs =
-				options?.streamingBehavior === "followUp"
-					? "followUp"
-					: options?.streamingBehavior === "steer"
-						? "steer"
-						: "nextTurn";
 			await this.session.sendCustomMessage(
 				{ customType: "mission-mode-context", content: missionContext, display: false },
 				{ deliverAs },
@@ -2859,40 +2886,18 @@ export class InteractiveMode {
 			return;
 		}
 
-		if (!this.specState || this.specState.phase === "inactive" || !this.isSpecMaskEnabled()) {
-			await this.session.prompt(text, options);
-			return;
-		}
-
-		if (this.specState.phase === "approved") {
-			this.persistSpecState(
-				createSpecState({
-					...this.specState,
-					phase: "planning",
-					planningStartedAt: undefined,
-					planningTurnCount: undefined,
-					planningEvidence: undefined,
-				}),
-			);
-			await this.applySpecStateToSession(this.specState);
-		}
-
-		const context =
-			this.specState.phase === "planning"
-				? buildSpecPlanningContext()
-				: specHasPlan(this.specState) && this.specState.phase === "executing"
-					? buildSpecExecutionContext(this.specState.plan, this.specState.artifactPath)
-					: undefined;
-
-		if (context) {
-			const deliverAs =
-				options?.streamingBehavior === "followUp"
-					? "followUp"
-					: options?.streamingBehavior === "steer"
-						? "steer"
-						: "nextTurn";
+		if (this.isSpecArmedForNextTurn()) {
 			await this.session.sendCustomMessage(
-				{ customType: "spec-mode-context", content: context, display: false },
+				{ customType: "spec-mode-context", content: buildSpecPlanningTurnContext(), display: false },
+				{ deliverAs },
+			);
+		} else if (this.specState?.phase === "executing" && specHasPlan(this.specState)) {
+			await this.session.sendCustomMessage(
+				{
+					customType: "spec-execution-context",
+					content: buildSpecExecutionTurnContext(this.specState.plan, this.specState.artifactPath),
+					display: false,
+				},
 				{ deliverAs },
 			);
 		}
@@ -2900,29 +2905,11 @@ export class InteractiveMode {
 		await this.session.prompt(text, options);
 	}
 
-	private async triggerSpecPlanningAutoContinuationTurn(missing: string[]): Promise<void> {
-		this.specAutoContinuationActive = true;
-		this.session.removeCustomMessages(["spec-mode-context", "mission-mode-context", "spec-planning-continuation"]);
-		await this.session.sendCustomMessage(
-			{ customType: "spec-mode-context", content: buildSpecPlanningContext(), display: false },
-			{ deliverAs: "nextTurn" },
-		);
-		await this.session.sendCustomMessage(
-			{
-				customType: "spec-planning-continuation",
-				content: buildSpecPlanningContinuationContext(missing),
-				display: false,
-			},
-			{ triggerTurn: true },
-		);
-	}
-
 	private async enterSpecMode(initialRequest?: string): Promise<void> {
-		if (this.specState?.phase !== "planning") {
+		if (!this.isSpecArmedForNextTurn()) {
 			const currentModel = this.session.model;
 			const next = createSpecState({
 				id: this.specState?.phase === "inactive" ? this.specState.id : undefined,
-				maskEnabled: true,
 				phase: "planning",
 				request: initialRequest,
 				previousActiveTools: this.session.getActiveToolNames(),
@@ -2946,24 +2933,38 @@ export class InteractiveMode {
 			return;
 		}
 
-		this.showStatus("Specification mode enabled. Describe the feature to plan.");
+		this.showStatus("Specification is on for the next turn. Send the feature request you want planned.");
 	}
 
 	private handleSpecStatus(): void {
+		if (this.isSpecArmedForNextTurn()) {
+			this.showStatus("Specification is on for the next turn.");
+			return;
+		}
+
+		if (this.hasPendingSpecPlan() && this.specState) {
+			const lines = [
+				"Specification plan ready for approval.",
+				this.specState.title ? `Title: ${this.specState.title}` : undefined,
+				this.specState.artifactPath ? `Artifact: ${this.specState.artifactPath}` : undefined,
+			]
+				.filter((line): line is string => Boolean(line))
+				.join("\n");
+			this.showStatus(lines);
+			return;
+		}
+
+		if (this.specState?.phase === "executing") {
+			this.showStatus(`Executing approved specification${this.specState.title ? `: ${this.specState.title}` : ""}`);
+			return;
+		}
+
 		if (!this.specState || this.specState.phase === "inactive") {
 			this.showStatus("No active specification plan");
 			return;
 		}
 
-		const lines = [
-			`Specification mode: ${this.specState.phase}`,
-			this.specState.phase === "approved" ? "Plan is waiting for approval or iteration." : undefined,
-			this.specState.title ? `Title: ${this.specState.title}` : undefined,
-			this.specState.artifactPath ? `Artifact: ${this.specState.artifactPath}` : undefined,
-		]
-			.filter((line): line is string => Boolean(line))
-			.join("\n");
-		this.showStatus(lines);
+		this.showStatus("No active specification plan");
 	}
 
 	private async clearSpecMode(): Promise<void> {
@@ -2990,12 +2991,12 @@ export class InteractiveMode {
 		this.persistSpecState(
 			createSpecState({
 				...this.specState,
-				maskEnabled: true,
 				phase: "executing",
 				artifactPath,
 				approvedAt,
 			}),
 		);
+		await this.applySpecStateToSession(this.specState);
 
 		await this.session.sendCustomMessage(
 			{
@@ -3005,14 +3006,8 @@ export class InteractiveMode {
 			},
 			{ triggerTurn: false },
 		);
-		this.session.removeCustomMessages(["spec-mode-context", "mission-mode-context"]);
-		await this.session.sendCustomMessage(
-			{
-				customType: "spec-mode-context",
-				content: buildSpecExecutionContext(this.specState.plan, artifactPath),
-				display: false,
-			},
-			{ triggerTurn: true },
+		await this.withSpecContextPrompt(
+			`The specification at ${artifactPath} has been approved. Implement the approved plan and report the verification results.`,
 		);
 	}
 
@@ -3061,78 +3056,45 @@ export class InteractiveMode {
 	}
 
 	private async maybeHandleSpecPlan(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
-		if (this.specState?.phase !== "planning") {
+		const specState = this.specState;
+		if (!this.isSpecArmedForNextTurn(specState) || !specState) {
 			return;
 		}
 
-		const autoContinuationActive = this.specAutoContinuationActive;
-		this.specAutoContinuationActive = false;
-		const priorPlanningTurns = this.specState.planningTurnCount ?? 0;
-		const mergedEvidence = mergeSpecPlanningEvidence(
-			this.specState.planningEvidence,
-			collectSpecPlanningEvidence(event.messages),
-		);
-		const nextPlanningTurnCount = priorPlanningTurns + 1;
 		const lastAssistant = this.getLastAssistantMessage(event.messages);
-		const plan = lastAssistant ? parseSpecPlan(this.getAssistantText(lastAssistant)) : undefined;
-		if (!plan || this.specState.plan?.markdown === plan.markdown) {
-			this.persistSpecState(
-				createSpecState({
-					...this.specState,
-					phase: "planning",
-					planningTurnCount: nextPlanningTurnCount,
-					planningEvidence: mergedEvidence,
-				}),
-			);
-			return;
-		}
-
-		const gate = evaluateSpecPlanningGate({
-			priorPlanningTurns,
-			evidence: mergedEvidence,
-			requestText: this.specState.request,
-			planMarkdown: plan.markdown,
-		});
-		if (!gate.ready) {
-			this.persistSpecState(
-				createSpecState({
-					...this.specState,
-					phase: "planning",
-					planningTurnCount: nextPlanningTurnCount,
-					planningEvidence: mergedEvidence,
-				}),
-			);
-			this.clearStreamingSpecPlan();
-			if (!autoContinuationActive && shouldAutoContinueSpecPlanning(gate.missing)) {
-				await this.triggerSpecPlanningAutoContinuationTurn(gate.missing);
+		const outcome = getSpecPlanningTurnOutcome(lastAssistant ? this.getAssistantText(lastAssistant) : "");
+		if (outcome.kind === "valid-plan") {
+			if (specState.plan?.markdown === outcome.plan.markdown) {
+				this.persistSpecState(createSpecState({ ...specState, phase: "planning" }));
 				return;
 			}
-			this.showSpecPlanningBlockedFeedback(gate.missing);
-			this.showStatus(this.formatSpecPlanningGateStatus(gate.missing));
+
+			this.persistSpecState(
+				createSpecState({
+					...specState,
+					phase: "approved",
+					title: outcome.plan.title,
+					plan: outcome.plan,
+				}),
+			);
+
+			await this.session.sendCustomMessage(
+				{
+					customType: "spec-plan",
+					content: outcome.plan.markdown,
+					display: true,
+				},
+				{ triggerTurn: false },
+			);
+
+			await this.showSpecSelector();
 			return;
 		}
 
-		this.persistSpecState(
-			createSpecState({
-				...this.specState,
-				phase: "approved",
-				title: plan.title,
-				plan,
-				planningTurnCount: nextPlanningTurnCount,
-				planningEvidence: mergedEvidence,
-			}),
-		);
-
-		await this.session.sendCustomMessage(
-			{
-				customType: "spec-plan",
-				content: plan.markdown,
-				display: true,
-			},
-			{ triggerTurn: false },
-		);
-
-		await this.showSpecSelector();
+		this.persistSpecState(createSpecState({ ...specState, phase: "planning" }));
+		if (outcome.kind === "continue-planning" || outcome.kind === "contract-violation") {
+			this.showStatus(outcome.statusMessage);
+		}
 	}
 
 	private async setSpecModel(modelReference: string): Promise<void> {
@@ -3146,7 +3108,7 @@ export class InteractiveMode {
 					phase: previous?.phase ?? "inactive",
 				}),
 			);
-			if (previous?.phase === "planning") {
+			if (this.isSpecArmedForNextTurn(previous)) {
 				await this.restoreSessionAfterSpec(previous);
 				this.session.setActiveToolsByName(getSpecPlanningToolNames());
 			}
@@ -3172,7 +3134,7 @@ export class InteractiveMode {
 				},
 			}),
 		);
-		if (this.specState?.phase === "planning") {
+		if (this.isSpecArmedForNextTurn()) {
 			await this.applySpecStateToSession(this.specState);
 		}
 		this.showStatus(`Spec planning model: ${resolved.model.name || resolved.model.id}`);
@@ -3452,7 +3414,7 @@ export class InteractiveMode {
 
 	private buildVisibleAssistantMessage(message: AssistantMessage): AssistantMessage {
 		const isMissionPlanning = Boolean(this.missionState && this.missionState.status === "planning");
-		const isSpecPlanning = this.specState?.phase === "planning";
+		const isSpecPlanning = this.isSpecArmedForNextTurn();
 
 		if (!isMissionPlanning && !isSpecPlanning) {
 			return message;
@@ -3866,7 +3828,7 @@ export class InteractiveMode {
 	private async handleSpecCommand(text: string): Promise<void> {
 		const rest = text.slice(5).trim();
 		if (!rest) {
-			if (this.specState?.phase && this.specState.phase !== "inactive" && specHasPlan(this.specState)) {
+			if (this.hasPendingSpecPlan() || this.specState?.phase === "executing") {
 				await this.showSpecSelector();
 				return;
 			}
@@ -3875,7 +3837,7 @@ export class InteractiveMode {
 		}
 
 		if (rest === "status") {
-			if (specHasPlan(this.specState)) {
+			if (this.hasPendingSpecPlan() || this.specState?.phase === "executing") {
 				await this.showSpecSelector();
 			} else {
 				this.handleSpecStatus();
@@ -4688,8 +4650,11 @@ export class InteractiveMode {
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
 					this.pendingTools.delete(event.toolCallId);
-					this.ui.requestRender();
 				}
+				if (event.toolName === "todowrite" && !event.isError && isTodoWriteToolDetails(event.result?.details)) {
+					this.setTodoDockTodos(cloneTodoWriteDetails(event.result.details).todos);
+				}
+				this.ui.requestRender();
 				break;
 			}
 
@@ -5013,6 +4978,7 @@ export class InteractiveMode {
 		}
 
 		this.pendingTools.clear();
+		this.syncTodoDockFromMessages(sessionContext.messages);
 		this.ui.requestRender();
 	}
 
@@ -5188,7 +5154,7 @@ export class InteractiveMode {
 	private updateEditorBorderColor(): void {
 		if (this.isBashMode) {
 			this.editor.borderColor = theme.getBashModeBorderColor();
-		} else if (this.isSpecMaskEnabled()) {
+		} else if (this.shouldHighlightSpecUi()) {
 			this.editor.borderColor = (text: string) => theme.fg(this.getSpecThemeColor(), text);
 		} else {
 			const level = this.session.thinkingLevel || "off";
@@ -5235,6 +5201,16 @@ export class InteractiveMode {
 		for (const child of this.chatContainer.children) {
 			if (isExpandable(child)) {
 				child.setExpanded(expanded);
+			}
+		}
+		for (const widget of this.extensionWidgetsAbove.values()) {
+			if (isExpandable(widget)) {
+				widget.setExpanded(expanded);
+			}
+		}
+		for (const widget of this.extensionWidgetsBelow.values()) {
+			if (isExpandable(widget)) {
+				widget.setExpanded(expanded);
 			}
 		}
 		this.ui.requestRender();
@@ -6208,7 +6184,6 @@ export class InteractiveMode {
 	}
 
 	private async handleResumeSession(sessionPath: string): Promise<void> {
-		this.specAutoContinuationActive = false;
 		this.stopDetachedSessionView();
 		this.clearDetachedActiveSessionState();
 		this.missionOrchestrator?.abort();
@@ -6826,7 +6801,7 @@ export class InteractiveMode {
 | \`${cycleThinkingLevel}\` | Cycle thinking level |
 | \`${cycleModelForward}\` / \`${cycleModelBackward}\` | Cycle models |
 | \`${selectModel}\` | Open model selector |
-| \`${toggleSpec}\` | Toggle specification mode |
+| \`${toggleSpec}\` | Open spec planning / review current spec |
 | \`${cycleAutonomy}\` | Cycle autonomy mode |
 | \`${expandTools}\` | Toggle tool output expansion |
 | \`${toggleThinking}\` | Toggle thinking block visibility |
@@ -6867,7 +6842,6 @@ export class InteractiveMode {
 	}
 
 	private async handleClearCommand(): Promise<void> {
-		this.specAutoContinuationActive = false;
 		this.missionOrchestrator?.abort();
 		this.missionOrchestrator = undefined;
 		await this.restoreSessionAfterSpec(this.specState);
@@ -7107,7 +7081,6 @@ export class InteractiveMode {
 	}
 
 	stop(): void {
-		this.specAutoContinuationActive = false;
 		this.stopDetachedSessionView();
 		this.missionOrchestrator?.abort();
 		this.missionOrchestrator = undefined;

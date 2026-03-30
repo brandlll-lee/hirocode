@@ -14,7 +14,7 @@ import type {
 } from "../policy/types.js";
 import type { ReadonlySessionManager, SessionManager } from "../session-manager.js";
 import type { SettingsManager } from "../settings-manager.js";
-import { readLatestSpecState } from "../spec/state.js";
+import { isSpecArmedForNextTurn, readLatestSpecState } from "../spec/state.js";
 
 export const APPROVAL_REQUEST_CUSTOM_TYPE = "hirocode.approval.request";
 export const APPROVAL_DECISION_CUSTOM_TYPE = "hirocode.approval.decision";
@@ -354,7 +354,7 @@ function canAutoApprove(mode: ReturnType<SettingsManager["getAutonomyMode"]>, su
 
 function shouldAutoApproveInSpecPlanning(sessionManager: ReadonlySessionManager, subject: ApprovalSubject): boolean {
 	const specState = readLatestSpecState(sessionManager);
-	if (specState?.phase !== "planning" || specState.maskEnabled === false) {
+	if (!isSpecArmedForNextTurn(specState)) {
 		return false;
 	}
 

@@ -226,9 +226,9 @@ ${chalk.bold("Options:")}
   --no-session                   Don't save session (ephemeral)
   --models <patterns>            Comma-separated model patterns for Ctrl+P cycling
                                  Supports globs (anthropic/*, *sonnet*) and fuzzy matching
-	  --no-tools                     Disable all built-in tools
-	  --tools <tools>                Comma-separated list of tools to enable (default: read,bash,edit,write,webfetch,websearch,task)
-	                                 Available: read, bash, edit, write, task, todowrite, grep, find, ls, webfetch, websearch
+  --no-tools                     Disable all built-in tools
+  --tools <tools>                Comma-separated list of tools to enable (default: read,bash,edit,write,webfetch,websearch,task,todowrite)
+                                 Available: read, bash, edit, write, task, todowrite, grep, find, ls, webfetch, websearch
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh
   --extension, -e <path>         Load an extension file (can be used multiple times)
   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)
@@ -334,13 +334,13 @@ ${chalk.bold("Environment Variables:")}
 
 Legacy aliases still work: ${ENV_AGENT_DIR_LEGACY}, ${ENV_PACKAGE_DIR_LEGACY}, ${ENV_OFFLINE_LEGACY}, ${ENV_SHARE_VIEWER_URL_LEGACY}
 
-${chalk.bold("Available Tools (default: read, bash, edit, write, webfetch, websearch, task):")}
+${chalk.bold("Available Tools (default: read, bash, edit, write, webfetch, websearch, task, todowrite):")}
   read   - Read file contents
   bash   - Execute bash commands
   edit   - Edit files with find/replace
   write  - Write files (creates/overwrites)
   task   - Delegate focused work to a built-in or configured subagent session
-  todowrite - Create or replace a structured todo list (off by default)
+  todowrite - Create or replace a structured todo list
   grep   - Search file contents (read-only, off by default)
   find   - Find files by glob pattern (read-only, off by default)
   ls     - List directory contents (read-only, off by default)

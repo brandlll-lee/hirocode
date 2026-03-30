@@ -38,7 +38,6 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "mission", description: "Start or control a mission" },
 	{ name: "enter-mission", description: "Enter mission planning mode (alias for /mission)" },
 	{ name: "missions", description: "List saved missions" },
-	{ name: "spec", description: "Enter specification mode or manage the current spec" },
 	{ name: "subagents", description: "Open delegated child sessions" },
 	{ name: "approvals", description: "Open pending approval requests" },
 	{ name: "mcp", description: "Manage MCP servers" },

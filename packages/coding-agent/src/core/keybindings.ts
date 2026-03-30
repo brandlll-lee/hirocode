@@ -89,7 +89,7 @@ export const KEYBINDINGS = {
 	},
 	"app.spec.toggle": {
 		defaultKeys: "ctrl+b",
-		description: "Toggle specification mode",
+		description: "Open spec planning or review the current spec",
 	},
 	"app.autonomy.cycle": {
 		defaultKeys: "ctrl+x",

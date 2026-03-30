@@ -217,7 +217,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 });
 
 describe("InteractiveMode.maybeHandleSpecPlan", () => {
-	test("approves a first-turn spec plan when the strict planning evidence is already complete", async () => {
+	test("approves a spec plan when the assistant emits <proposed_plan>", async () => {
 		const sendCustomMessage = vi.fn(async () => undefined);
 		const showSpecSelector = vi.fn(async () => undefined);
 		const persistSpecState = vi.fn(function (this: any, state: any) {
@@ -227,16 +227,6 @@ describe("InteractiveMode.maybeHandleSpecPlan", () => {
 			specState: createSpecState({
 				phase: "planning",
 				request: "Create a new React + Vite landing page",
-				planningEvidence: {
-					hasGrounding: true,
-					hasAsk: true,
-					hasAgentsGuidance: true,
-					hasDependencyReview: true,
-					askCount: 2,
-					hasWebSearch: true,
-					hasWebFetch: true,
-					hasVersionResearch: true,
-				},
 			}),
 			persistSpecState,
 			session: { sendCustomMessage },
@@ -247,14 +237,7 @@ describe("InteractiveMode.maybeHandleSpecPlan", () => {
 					.map((part: any) => part.text)
 					.join("\n"),
 			showSpecSelector,
-			clearStreamingSpecPlan: vi.fn(),
-			showSpecPlanningBlockedFeedback: vi.fn(),
-			showStatus: vi.fn(),
-			formatSpecPlanningGateStatus: (missing: string[]) =>
-				[
-					"Specification plan blocked until the planning prerequisites are complete:",
-					...missing.map((item) => `- ${item}`),
-				].join("\n"),
+			isSpecArmedForNextTurn: () => true,
 		};
 
 		await (InteractiveMode as any).prototype.maybeHandleSpecPlan.call(fakeThis, {
@@ -284,7 +267,6 @@ describe("InteractiveMode.maybeHandleSpecPlan", () => {
 		});
 
 		expect(fakeThis.specState.phase).toBe("approved");
-		expect(fakeThis.specState.planningTurnCount).toBe(1);
 		expect(fakeThis.specState.title).toBe("First-Turn Approval");
 		expect(sendCustomMessage).toHaveBeenCalledWith(
 			{
@@ -303,14 +285,9 @@ describe("InteractiveMode.maybeHandleSpecPlan", () => {
 			{ triggerTurn: false },
 		);
 		expect(showSpecSelector).toHaveBeenCalledTimes(1);
-		expect(fakeThis.clearStreamingSpecPlan).not.toHaveBeenCalled();
-		expect(fakeThis.showSpecPlanningBlockedFeedback).not.toHaveBeenCalled();
-		expect(fakeThis.showStatus).not.toHaveBeenCalled();
 	});
 
-	test("automatically continues planning when only discoverable evidence is still missing", async () => {
-		const sendCustomMessage = vi.fn(async () => undefined);
-		const removeCustomMessages = vi.fn();
+	test("keeps planning when no proposed plan was emitted", async () => {
 		const showSpecSelector = vi.fn(async () => undefined);
 		const persistSpecState = vi.fn(function (this: any, state: any) {
 			this.specState = state;
@@ -318,20 +295,10 @@ describe("InteractiveMode.maybeHandleSpecPlan", () => {
 		const fakeThis: any = {
 			specState: createSpecState({
 				phase: "planning",
-				request: "Create a new React + Vite project from scratch",
-				planningEvidence: {
-					hasGrounding: true,
-					hasAsk: true,
-					hasAgentsGuidance: true,
-					hasDependencyReview: true,
-					askCount: 2,
-					hasWebSearch: true,
-					hasWebFetch: true,
-					hasVersionResearch: false,
-				},
+				request: "Plan the feature",
 			}),
 			persistSpecState,
-			session: { sendCustomMessage, removeCustomMessages },
+			session: { sendCustomMessage: vi.fn(async () => undefined) },
 			getLastAssistantMessage: interactiveModePrototype.getLastAssistantMessage,
 			getAssistantText: (message: any) =>
 				message.content
@@ -339,12 +306,61 @@ describe("InteractiveMode.maybeHandleSpecPlan", () => {
 					.map((part: any) => part.text)
 					.join("\n"),
 			showSpecSelector,
-			clearStreamingSpecPlan: vi.fn(),
-			showSpecPlanningBlockedFeedback: vi.fn(),
 			showStatus: vi.fn(),
-			formatSpecPlanningGateStatus: (missing: string[]) => missing.join("\n"),
-			triggerSpecPlanningAutoContinuationTurn: interactiveModePrototype.triggerSpecPlanningAutoContinuationTurn,
-			specAutoContinuationActive: false,
+			isSpecArmedForNextTurn: () => true,
+		};
+
+		await (InteractiveMode as any).prototype.maybeHandleSpecPlan.call(fakeThis, {
+			type: "agent_end",
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "text",
+							text: "I inspected the repository and still need one clarification before I can draft the plan.",
+						},
+					],
+					timestamp: Date.now(),
+				},
+			],
+		});
+
+		expect(fakeThis.specState.phase).toBe("planning");
+		expect(showSpecSelector).not.toHaveBeenCalled();
+	});
+
+	test("keeps planning when the assistant repeats the same proposed plan", async () => {
+		const showSpecSelector = vi.fn(async () => undefined);
+		const existingPlan = createSpecPlan("Dependency-Sensitive Plan");
+		existingPlan.markdown = `# Dependency-Sensitive Plan
+## Summary
+- Create the initial app with the latest stable stack
+## File Changes
+- package.json
+## Implementation Plan
+1. Scaffold the app
+## Verification Plan
+1. Add a regression test`;
+		const persistSpecState = vi.fn(function (this: any, state: any) {
+			this.specState = state;
+		});
+		const fakeThis: any = {
+			specState: createSpecState({
+				phase: "planning",
+				request: "Create a new React + Vite project from scratch",
+				plan: existingPlan,
+			}),
+			persistSpecState,
+			session: { sendCustomMessage: vi.fn(async () => undefined) },
+			getLastAssistantMessage: interactiveModePrototype.getLastAssistantMessage,
+			getAssistantText: (message: any) =>
+				message.content
+					.filter((part: any) => part.type === "text")
+					.map((part: any) => part.text)
+					.join("\n"),
+			showSpecSelector,
+			isSpecArmedForNextTurn: () => true,
 		};
 
 		await (InteractiveMode as any).prototype.maybeHandleSpecPlan.call(fakeThis, {
@@ -374,111 +390,7 @@ describe("InteractiveMode.maybeHandleSpecPlan", () => {
 		});
 
 		expect(fakeThis.specState.phase).toBe("planning");
-		expect(fakeThis.specState.planningTurnCount).toBe(1);
-		expect(sendCustomMessage).toHaveBeenCalledTimes(2);
-		expect(sendCustomMessage).toHaveBeenNthCalledWith(
-			1,
-			{
-				customType: "spec-mode-context",
-				content: expect.stringContaining("[SPECIFICATION MODE ACTIVE]"),
-				display: false,
-			},
-			{ deliverAs: "nextTurn" },
-		);
-		expect(sendCustomMessage).toHaveBeenNthCalledWith(
-			2,
-			{
-				customType: "spec-planning-continuation",
-				content: expect.stringContaining("[SPEC PLANNING CONTINUATION]"),
-				display: false,
-			},
-			{ triggerTurn: true },
-		);
-		expect(removeCustomMessages).toHaveBeenCalledWith([
-			"spec-mode-context",
-			"mission-mode-context",
-			"spec-planning-continuation",
-		]);
 		expect(showSpecSelector).not.toHaveBeenCalled();
-		expect(fakeThis.clearStreamingSpecPlan).toHaveBeenCalledTimes(1);
-		expect(fakeThis.showSpecPlanningBlockedFeedback).not.toHaveBeenCalled();
-		expect(fakeThis.showStatus).not.toHaveBeenCalled();
-		expect(fakeThis.specAutoContinuationActive).toBe(true);
-	});
-
-	test("shows blocked feedback when a second automatic continuation would loop", async () => {
-		const sendCustomMessage = vi.fn(async () => undefined);
-		const showSpecSelector = vi.fn(async () => undefined);
-		const persistSpecState = vi.fn(function (this: any, state: any) {
-			this.specState = state;
-		});
-		const fakeThis: any = {
-			specState: createSpecState({
-				phase: "planning",
-				request: "Create a new React + Vite project from scratch",
-				planningEvidence: {
-					hasGrounding: true,
-					hasAsk: true,
-					hasAgentsGuidance: true,
-					hasDependencyReview: true,
-					askCount: 2,
-					hasWebSearch: true,
-					hasWebFetch: true,
-					hasVersionResearch: false,
-				},
-			}),
-			persistSpecState,
-			session: { sendCustomMessage, removeCustomMessages: vi.fn() },
-			getLastAssistantMessage: interactiveModePrototype.getLastAssistantMessage,
-			getAssistantText: (message: any) =>
-				message.content
-					.filter((part: any) => part.type === "text")
-					.map((part: any) => part.text)
-					.join("\n"),
-			showSpecSelector,
-			clearStreamingSpecPlan: vi.fn(),
-			showSpecPlanningBlockedFeedback: vi.fn(),
-			showStatus: vi.fn(),
-			formatSpecPlanningGateStatus: (missing: string[]) => missing.join("\n"),
-			triggerSpecPlanningAutoContinuationTurn: vi.fn(),
-			specAutoContinuationActive: true,
-		};
-
-		await (InteractiveMode as any).prototype.maybeHandleSpecPlan.call(fakeThis, {
-			type: "agent_end",
-			messages: [
-				{
-					role: "assistant",
-					content: [
-						{
-							type: "text",
-							text: `<proposed_plan>
-# Dependency-Sensitive Plan
-## Summary
-- Create the initial app with the latest stable stack
-## File Changes
-- package.json
-## Implementation Plan
-1. Scaffold the app
-## Verification Plan
-1. Add a regression test
-</proposed_plan>`,
-						},
-					],
-					timestamp: Date.now(),
-				},
-			],
-		});
-
-		expect(sendCustomMessage).not.toHaveBeenCalled();
-		expect(showSpecSelector).not.toHaveBeenCalled();
-		expect(fakeThis.clearStreamingSpecPlan).toHaveBeenCalledTimes(1);
-		expect(fakeThis.showSpecPlanningBlockedFeedback).toHaveBeenCalledTimes(1);
-		expect(fakeThis.showSpecPlanningBlockedFeedback.mock.calls[0][0]).toEqual([
-			"research official current stable dependency or framework versions relevant to this task",
-		]);
-		expect(fakeThis.showStatus).toHaveBeenCalledTimes(1);
-		expect(fakeThis.specAutoContinuationActive).toBe(false);
 	});
 });
 
@@ -501,7 +413,6 @@ describe("InteractiveMode spec execution completion", () => {
 		});
 		const fakeThis: any = {
 			specState: executingState,
-			specAutoContinuationActive: false,
 			session: { isRetrying: false },
 			restoreSessionAfterSpec,
 			persistSpecState,
@@ -544,7 +455,6 @@ describe("InteractiveMode spec execution completion", () => {
 		});
 		const fakeThis: any = {
 			specState: executingState,
-			specAutoContinuationActive: false,
 			session: { isRetrying: false },
 			restoreSessionAfterSpec,
 			persistSpecState,
@@ -609,7 +519,6 @@ describe("InteractiveMode spec execution completion", () => {
 		});
 		const fakeThis: any = {
 			specState: executingState,
-			specAutoContinuationActive: false,
 			restoreSessionAfterSpec,
 			persistSpecState,
 			applySpecStateToSession,
@@ -733,7 +642,7 @@ describe("InteractiveMode.updateSpecWidget", () => {
 		initTheme("dark");
 	});
 
-	test("renders a compact spec card and highlights /spec with the spec theme color", () => {
+	test("renders a compact spec card and highlights the ctrl+b review hint with the spec theme color", () => {
 		const setExtensionWidget = vi.fn();
 		const fakeThis = {
 			specState: createSpecState({
@@ -742,7 +651,7 @@ describe("InteractiveMode.updateSpecWidget", () => {
 				plan: createSpecPlan(),
 			}),
 			missionState: undefined,
-			isSpecMaskEnabled: () => true,
+			hasPendingSpecPlan: () => true,
 			setExtensionWidget,
 			getSpecThemeColor: interactiveModePrototype.getSpecThemeColor,
 			getSpecWidgetTitleLine: interactiveModePrototype.getSpecWidgetTitleLine,
@@ -757,8 +666,78 @@ describe("InteractiveMode.updateSpecWidget", () => {
 		expect(lines.join("\n")).not.toContain("Phase: approved");
 		expect(lines.join("\n")).not.toContain("Specification Specification Plan");
 		expect(lines[0]).toBe(theme.fg("customMessageLabel", "Specification"));
-		expect(lines[1]).toContain(theme.fg("customMessageLabel", "/spec"));
+		expect(lines[1]).toContain(theme.fg("customMessageLabel", "Ctrl+B"));
 		expect(options).toEqual({ placement: "aboveEditor" });
+	});
+});
+
+describe("InteractiveMode.toggleSpecMask", () => {
+	test("arms specification for the next turn when inactive", async () => {
+		const enterSpecMode = vi.fn(async () => undefined);
+		const fakeThis: any = {
+			specState: createSpecState({ phase: "inactive" }),
+			hasMissionModeIndicator: () => false,
+			hasPendingSpecPlan: () => false,
+			isSpecArmedForNextTurn: () => false,
+			enterSpecMode,
+			showSpecSelector: vi.fn(),
+			showWarning: vi.fn(),
+		};
+
+		await interactiveModePrototype.toggleSpecMask.call(fakeThis);
+
+		expect(enterSpecMode).toHaveBeenCalledTimes(1);
+	});
+
+	test("clears next-turn specification state instead of hiding planning", async () => {
+		const restoreSessionAfterSpec = vi.fn(async () => undefined);
+		const persistSpecState = vi.fn(function (this: any, state: any) {
+			this.specState = state;
+		});
+		const applySpecStateToSession = vi.fn(async function (this: any, state: any) {
+			this.specState = state;
+		});
+		const planningState = createSpecState({
+			phase: "planning",
+			previousActiveTools: ["read", "bash", "task"],
+		});
+		const fakeThis: any = {
+			specState: planningState,
+			hasMissionModeIndicator: () => false,
+			hasPendingSpecPlan: () => false,
+			isSpecArmedForNextTurn: () => true,
+			restoreSessionAfterSpec,
+			persistSpecState,
+			applySpecStateToSession,
+			enterSpecMode: vi.fn(),
+			showSpecSelector: vi.fn(),
+			showStatus: vi.fn(),
+			showWarning: vi.fn(),
+		};
+
+		await interactiveModePrototype.toggleSpecMask.call(fakeThis);
+
+		expect(restoreSessionAfterSpec).toHaveBeenCalledWith(planningState);
+		expect(fakeThis.specState.phase).toBe("inactive");
+		expect(fakeThis.specState.maskEnabled).toBe(false);
+		expect(fakeThis.showStatus).toHaveBeenCalledWith("Specification is off for the next turn.");
+	});
+
+	test("opens the selector when a spec plan is pending", async () => {
+		const showSpecSelector = vi.fn(async () => undefined);
+		const fakeThis: any = {
+			specState: createSpecState({ phase: "approved", plan: createSpecPlan() }),
+			hasMissionModeIndicator: () => false,
+			hasPendingSpecPlan: () => true,
+			isSpecArmedForNextTurn: () => false,
+			showSpecSelector,
+			enterSpecMode: vi.fn(),
+			showWarning: vi.fn(),
+		};
+
+		await interactiveModePrototype.toggleSpecMask.call(fakeThis);
+
+		expect(showSpecSelector).toHaveBeenCalledTimes(1);
 	});
 });
 
@@ -772,10 +751,10 @@ describe("InteractiveMode.updateModeBanner", () => {
 			modeContainer: new Container(),
 			missionState: undefined,
 			getAutonomyModeDisplay: () => ({
-				label: "Auto (Spec)",
-				description: "planning stays read-only under spec rules",
+				label: "Auto (High)",
+				description: "all non-blocked commands",
 			}),
-			getSpecModeDisplay: () => "Spec (Approved)",
+			getSpecModeDisplay: () => "Spec Ready",
 			getSpecThemeColor: interactiveModePrototype.getSpecThemeColor,
 			hasMissionModeIndicator: () => false,
 			getWorkingSessionTimerLabel: () => "\u23F1\uFE0F0s",
@@ -786,7 +765,7 @@ describe("InteractiveMode.updateModeBanner", () => {
 
 		const lines = renderAll(fakeThis.modeContainer).split("\n");
 		expect(lines[1]).toContain("\u23F1\uFE0F0s");
-		expect(lines[1].indexOf("\u23F1\uFE0F0s")).toBeLessThan(lines[1].indexOf("toggle spec"));
+		expect(lines[1].indexOf("\u23F1\uFE0F0s")).toBeLessThan(lines[1].indexOf("spec"));
 		expect(lines[1]).toContain("cycle auto");
 	});
 });
@@ -799,7 +778,7 @@ describe("InteractiveMode.updateEditorBorderColor", () => {
 	test("uses the spec theme color while spec mode is active", () => {
 		const fakeThis: any = {
 			isBashMode: false,
-			isSpecMaskEnabled: () => true,
+			shouldHighlightSpecUi: () => true,
 			session: { thinkingLevel: "xhigh" },
 			editor: { borderColor: undefined },
 			ui: { requestRender: vi.fn() },
@@ -815,7 +794,7 @@ describe("InteractiveMode.updateEditorBorderColor", () => {
 	test("keeps bash mode border color as the highest priority", () => {
 		const fakeThis: any = {
 			isBashMode: true,
-			isSpecMaskEnabled: () => true,
+			shouldHighlightSpecUi: () => true,
 			session: { thinkingLevel: "xhigh" },
 			editor: { borderColor: undefined },
 			ui: { requestRender: vi.fn() },
@@ -830,7 +809,7 @@ describe("InteractiveMode.updateEditorBorderColor", () => {
 	test("keeps thinking-level colors outside spec mode", () => {
 		const fakeThis: any = {
 			isBashMode: false,
-			isSpecMaskEnabled: () => false,
+			shouldHighlightSpecUi: () => false,
 			session: { thinkingLevel: "high" },
 			editor: { borderColor: undefined },
 			ui: { requestRender: vi.fn() },
@@ -840,6 +819,131 @@ describe("InteractiveMode.updateEditorBorderColor", () => {
 		interactiveModePrototype.updateEditorBorderColor.call(fakeThis);
 
 		expect(fakeThis.editor.borderColor("think")).toBe(theme.getThinkingBorderColor("high")("think"));
+	});
+});
+
+describe("InteractiveMode.applySpecStateToSession", () => {
+	test("keeps planning turns on the spec tool allowlist without installing a planning overlay", async () => {
+		const setSystemPromptOverlay = vi.fn();
+		const setActiveToolsByName = vi.fn();
+		const fakeThis: any = {
+			specState: undefined,
+			session: {
+				setSystemPromptOverlay,
+				setActiveToolsByName,
+				removeCustomMessages: vi.fn(),
+				modelRegistry: { find: vi.fn() },
+			},
+			syncInteractiveAskAvailability: vi.fn(),
+			clearStreamingSpecPlan: vi.fn(),
+			updateSpecWidget: vi.fn(),
+			updateModeBanner: vi.fn(),
+			showStatus: vi.fn(),
+			isSpecArmedForNextTurn: () => true,
+			hasPendingSpecPlan: () => false,
+		};
+
+		await interactiveModePrototype.applySpecStateToSession.call(
+			fakeThis,
+			createSpecState({ phase: "planning", request: "Plan the feature" }),
+		);
+
+		expect(setSystemPromptOverlay).toHaveBeenCalledWith(undefined);
+		expect(setActiveToolsByName).toHaveBeenCalledTimes(1);
+	});
+
+	test("clears the system prompt overlay when spec mode is inactive", async () => {
+		const setSystemPromptOverlay = vi.fn();
+		const fakeThis: any = {
+			specState: undefined,
+			session: {
+				setSystemPromptOverlay,
+				removeCustomMessages: vi.fn(),
+			},
+			syncInteractiveAskAvailability: vi.fn(),
+			clearStreamingSpecPlan: vi.fn(),
+			updateSpecWidget: vi.fn(),
+			updateModeBanner: vi.fn(),
+			isSpecArmedForNextTurn: () => false,
+			hasPendingSpecPlan: () => false,
+		};
+
+		await interactiveModePrototype.applySpecStateToSession.call(fakeThis, createSpecState({ phase: "inactive" }));
+
+		expect(setSystemPromptOverlay).toHaveBeenCalledWith(undefined);
+	});
+});
+
+describe("InteractiveMode.withSpecContextPrompt", () => {
+	test("injects a hidden planning context message before a spec planning turn", async () => {
+		const prompt = vi.fn(async () => undefined);
+		const removeCustomMessages = vi.fn();
+		const sendCustomMessage = vi.fn(async () => undefined);
+		const planningState = createSpecState({
+			phase: "planning",
+			request: "Plan the feature",
+		});
+		const fakeThis: any = {
+			specState: planningState,
+			missionState: undefined,
+			session: {
+				removeCustomMessages,
+				sendCustomMessage,
+				prompt,
+			},
+			isSpecArmedForNextTurn: () => true,
+		};
+
+		await interactiveModePrototype.withSpecContextPrompt.call(fakeThis, "Plan it");
+
+		expect(removeCustomMessages).toHaveBeenCalledWith([
+			"mission-mode-context",
+			"spec-mode-context",
+			"spec-execution-context",
+		]);
+		expect(sendCustomMessage).toHaveBeenCalledWith(
+			{
+				customType: "spec-mode-context",
+				content: expect.stringContaining("[SPECIFICATION MODE ACTIVE]"),
+				display: false,
+			},
+			{ deliverAs: "nextTurn" },
+		);
+		expect(prompt).toHaveBeenCalledWith("Plan it", undefined);
+	});
+
+	test("injects the approved spec as a hidden execution context on execution turns", async () => {
+		const prompt = vi.fn(async () => undefined);
+		const removeCustomMessages = vi.fn();
+		const sendCustomMessage = vi.fn(async () => undefined);
+		const approvedState = createSpecState({
+			phase: "executing",
+			plan: createSpecPlan("Ship the feature"),
+			artifactPath: ".hirocode/docs/ship-the-feature.md",
+		});
+		const fakeThis: any = {
+			specState: approvedState,
+			missionState: undefined,
+			session: {
+				removeCustomMessages,
+				sendCustomMessage,
+				prompt,
+			},
+			isSpecArmedForNextTurn: () => false,
+		};
+
+		await interactiveModePrototype.withSpecContextPrompt.call(fakeThis, "Ship it");
+
+		expect(sendCustomMessage).toHaveBeenCalledWith(
+			{
+				customType: "spec-execution-context",
+				content: expect.stringContaining("[EXECUTING APPROVED SPEC]"),
+				display: false,
+			},
+			{ deliverAs: "nextTurn" },
+		);
+		expect(prompt).toHaveBeenCalledWith("Ship it", undefined);
+		expect(fakeThis.specState.phase).toBe("executing");
 	});
 });
 
@@ -919,6 +1023,7 @@ describe("InteractiveMode.buildVisibleAssistantMessage", () => {
 			missionState: undefined,
 			specState: createSpecState({ phase: "planning", request: "Plan the feature" }),
 			updateStreamingSpecPlan: vi.fn(),
+			isSpecArmedForNextTurn: () => true,
 		};
 
 		const message = {
@@ -953,5 +1058,143 @@ describe("InteractiveMode.buildVisibleAssistantMessage", () => {
 		const visible = (InteractiveMode as any).prototype.buildVisibleAssistantMessage.call(fakeThis, message);
 		expect(visible.content[0].text).toBe("Intro\n\nOutro");
 		expect(fakeThis.updateStreamingSpecPlan).not.toHaveBeenCalled();
+	});
+});
+
+describe("InteractiveMode todo dock helpers", () => {
+	test("syncTodoDockFromMessages restores the latest todowrite result", () => {
+		const setTodoDockTodos = vi.fn();
+		const fakeThis: any = { setTodoDockTodos };
+
+		interactiveModePrototype.syncTodoDockFromMessages.call(fakeThis, [
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tool-1",
+						name: "todowrite",
+						arguments: { todos: [] },
+					},
+				],
+				stopReason: "stop",
+				timestamp: Date.now(),
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tool-1",
+				toolName: "todowrite",
+				content: [{ type: "text", text: "Updated todo list" }],
+				details: {
+					todos: [{ content: "Plan work", status: "in_progress", priority: "high" }],
+				},
+				timestamp: Date.now(),
+			},
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tool-2",
+						name: "read",
+						arguments: { filePath: "README.md" },
+					},
+				],
+				stopReason: "stop",
+				timestamp: Date.now(),
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tool-2",
+				toolName: "read",
+				content: [{ type: "text", text: "README" }],
+				details: { path: "README.md" },
+				timestamp: Date.now(),
+			},
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "tool-3",
+						name: "todowrite",
+						arguments: { todos: [] },
+					},
+				],
+				stopReason: "stop",
+				timestamp: Date.now(),
+			},
+			{
+				role: "toolResult",
+				toolCallId: "tool-3",
+				toolName: "todowrite",
+				content: [{ type: "text", text: "Updated todo list" }],
+				details: {
+					todos: [{ content: "Verify UI", status: "completed", priority: "medium" }],
+				},
+				timestamp: Date.now(),
+			},
+		]);
+
+		expect(setTodoDockTodos).toHaveBeenCalledTimes(1);
+		expect(setTodoDockTodos).toHaveBeenCalledWith([
+			{ content: "Verify UI", status: "completed", priority: "medium" },
+		]);
+	});
+
+	test("captureDetachedActiveSessionEvent updates the todo dock for detached todowrite results", () => {
+		const setTodoDockTodos = vi.fn();
+		const updateResult = vi.fn();
+		const fakeThis: any = {
+			detachedActiveToolComponents: new Map([["tool-1", { updateResult }]]),
+			detachedActivePendingToolIds: new Set(["tool-1"]),
+			setTodoDockTodos,
+		};
+
+		interactiveModePrototype.captureDetachedActiveSessionEvent.call(fakeThis, {
+			type: "tool_execution_end",
+			toolCallId: "tool-1",
+			toolName: "todowrite",
+			result: {
+				content: [{ type: "text", text: "Updated todo list" }],
+				details: {
+					todos: [{ content: "Track child session", status: "in_progress", priority: "high" }],
+				},
+			},
+			isError: false,
+		});
+
+		expect(updateResult).toHaveBeenCalledWith({
+			content: [{ type: "text", text: "Updated todo list" }],
+			details: {
+				todos: [{ content: "Track child session", status: "in_progress", priority: "high" }],
+			},
+			isError: false,
+		});
+		expect(fakeThis.detachedActivePendingToolIds.has("tool-1")).toBe(false);
+		expect(setTodoDockTodos).toHaveBeenCalledWith([
+			{ content: "Track child session", status: "in_progress", priority: "high" },
+		]);
+	});
+
+	test("setToolsExpanded updates expandable widgets above and below the editor", () => {
+		const chatChild = { setExpanded: vi.fn() };
+		const aboveWidget = { setExpanded: vi.fn() };
+		const belowWidget = { setExpanded: vi.fn() };
+		const fakeThis: any = {
+			toolOutputExpanded: false,
+			chatContainer: { children: [chatChild] },
+			extensionWidgetsAbove: new Map([["__todo_dock__", aboveWidget]]),
+			extensionWidgetsBelow: new Map([["__other__", belowWidget]]),
+			ui: { requestRender: vi.fn() },
+		};
+
+		interactiveModePrototype.setToolsExpanded.call(fakeThis, true);
+
+		expect(fakeThis.toolOutputExpanded).toBe(true);
+		expect(chatChild.setExpanded).toHaveBeenCalledWith(true);
+		expect(aboveWidget.setExpanded).toHaveBeenCalledWith(true);
+		expect(belowWidget.setExpanded).toHaveBeenCalledWith(true);
+		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
 	});
 });
